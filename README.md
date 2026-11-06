@@ -85,6 +85,9 @@ cargo run --release
 | `F` | Toggle rendering mode: M1 point-sprite debug view vs. M3 screen-space fluid rendering (SSFR) |
 | `R` | Reset the simulation to its initial dam-break state and clear all barricades |
 | `P` | Pause/resume the simulation (camera controls keep working while paused) |
+| `C` | Reset the camera to its default orbit view |
+| `+` / `-` | Speed up / slow down the simulation's time scale (substeps per rendered frame) |
+| `Q` | Quit |
 
 The app logs particle count, frame time, and basic physics sanity stats (min/max height, max
 speed, max density, NaN count) to stderr roughly once a second, plus densely for the first ~30

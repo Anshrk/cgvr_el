@@ -11,7 +11,7 @@ use params::SimParams;
 use particle::{init_dam_break, Particle};
 
 const WORKGROUP_SIZE: u32 = 64;
-const SUBSTEPS_PER_FRAME: u32 = 8;
+const DEFAULT_SUBSTEPS_PER_FRAME: u32 = 8;
 
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -71,6 +71,7 @@ pub struct SphSim {
     params_buffer: wgpu::Buffer,
     use_grid: bool,
     spacing: f32,
+    substeps_per_frame: u32,
 
     buffer_a: wgpu::Buffer,
     buffer_b: wgpu::Buffer,
@@ -507,6 +508,7 @@ impl SphSim {
             params_buffer,
             use_grid: true,
             spacing,
+            substeps_per_frame: DEFAULT_SUBSTEPS_PER_FRAME,
 
             buffer_a,
             buffer_b,
@@ -622,9 +624,21 @@ impl SphSim {
     /// time keeps pace with wall-clock time at a stable small dt.
     pub fn step(&mut self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&self.params));
-        for _ in 0..SUBSTEPS_PER_FRAME {
+        for _ in 0..self.substeps_per_frame {
             self.substep(encoder);
         }
+    }
+
+    pub fn substeps_per_frame(&self) -> u32 {
+        self.substeps_per_frame
+    }
+
+    /// Adjusts the simulation's time scale (substeps run per rendered
+    /// frame): faster playback for demoing, or slower for inspecting a
+    /// splash in more detail. Bound to `+`/`-`.
+    pub fn adjust_time_scale(&mut self, delta: i32) {
+        let new_value = self.substeps_per_frame as i32 + delta;
+        self.substeps_per_frame = new_value.clamp(1, 32) as u32;
     }
 
     fn substep(&mut self, encoder: &mut wgpu::CommandEncoder) {

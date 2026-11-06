@@ -69,6 +69,12 @@ impl OrbitController {
         }
     }
 
+    /// Resets yaw/pitch/distance to their initial values, keeping the
+    /// current orbit target. Bound to the `C` key.
+    pub fn reset(&mut self) {
+        *self = Self::new(self.target, 10.0);
+    }
+
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         const SENSITIVITY: f32 = 0.005;
         self.yaw += dx * SENSITIVITY;

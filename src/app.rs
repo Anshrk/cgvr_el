@@ -161,6 +161,21 @@ impl ApplicationHandler for App {
                             scene.paused = !scene.paused;
                             eprintln!("[cgvr] {}", if scene.paused { "paused" } else { "resumed" });
                         }
+                        if s.as_str().eq_ignore_ascii_case("q") {
+                            event_loop.exit();
+                        }
+                        if s.as_str().eq_ignore_ascii_case("c") {
+                            scene.orbit.reset();
+                            eprintln!("[cgvr] camera reset");
+                        }
+                        if s.as_str() == "+" || s.as_str() == "=" {
+                            scene.sph.adjust_time_scale(1);
+                            eprintln!("[cgvr] time scale: {} substeps/frame", scene.sph.substeps_per_frame());
+                        }
+                        if s.as_str() == "-" {
+                            scene.sph.adjust_time_scale(-1);
+                            eprintln!("[cgvr] time scale: {} substeps/frame", scene.sph.substeps_per_frame());
+                        }
                     }
                 }
             }
