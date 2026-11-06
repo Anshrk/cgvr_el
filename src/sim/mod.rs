@@ -133,12 +133,12 @@ impl SphSim {
         let buffer_a = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("particles-a"),
             contents: bytemuck::cast_slice(&particles),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         });
         let buffer_b = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particles-b"),
             size: buffer_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
