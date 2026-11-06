@@ -1,6 +1,7 @@
 use wgpu::util::DeviceExt;
 
 use crate::camera::CameraUniform;
+use crate::sim::barricade::Barricade;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -78,12 +79,33 @@ fn build_tank_geometry(domain_min: [f32; 3], domain_max: [f32; 3]) -> Vec<Backgr
     vertices
 }
 
+/// Generates all 6 faces of an axis-aligned box. No backface culling is
+/// configured on this pipeline, so winding order doesn't matter here.
+fn box_quads(center: [f32; 3], half: [f32; 3], color: [f32; 3]) -> Vec<BackgroundVertex> {
+    let (x0, x1) = (center[0] - half[0], center[0] + half[0]);
+    let (y0, y1) = (center[1] - half[1], center[1] + half[1]);
+    let (z0, z1) = (center[2] - half[2], center[2] + half[2]);
+
+    let mut vertices = Vec::with_capacity(36);
+    vertices.extend(quad([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], color)); // -X
+    vertices.extend(quad([[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], color)); // +X
+    vertices.extend(quad([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], color)); // +Y
+    vertices.extend(quad([[x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0]], color)); // -Y
+    vertices.extend(quad([[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], color)); // -Z
+    vertices.extend(quad([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], color)); // +Z
+    vertices
+}
+
+const BARRICADE_COLOR: [f32; 3] = [0.75, 0.35, 0.2];
+
 pub struct BackgroundPipeline {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
+    barricade_vertex_buffer: Option<wgpu::Buffer>,
+    barricade_vertex_count: u32,
 }
 
 impl BackgroundPipeline {
@@ -214,6 +236,8 @@ impl BackgroundPipeline {
             bind_group,
             vertex_buffer,
             vertex_count,
+            barricade_vertex_buffer: None,
+            barricade_vertex_count: 0,
         }
     }
 
@@ -221,10 +245,34 @@ impl BackgroundPipeline {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(uniform));
     }
 
+    /// Rebuilds the barricade box geometry. Called only when the list
+    /// actually changes (on placement), not every frame.
+    pub fn rebuild_barricades(&mut self, device: &wgpu::Device, barricades: &[Barricade]) {
+        let mut vertices = Vec::with_capacity(barricades.len() * 36);
+        for b in barricades {
+            vertices.extend(box_quads(b.center, b.half_extents, BARRICADE_COLOR));
+        }
+        self.barricade_vertex_count = vertices.len() as u32;
+        self.barricade_vertex_buffer = if vertices.is_empty() {
+            None
+        } else {
+            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("barricade-vertices"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }))
+        };
+    }
+
     pub fn draw<'pass>(&'pass self, render_pass: &mut wgpu::RenderPass<'pass>) {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.draw(0..self.vertex_count, 0..1);
+
+        if let Some(buf) = &self.barricade_vertex_buffer {
+            render_pass.set_vertex_buffer(0, buf.slice(..));
+            render_pass.draw(0..self.barricade_vertex_count, 0..1);
+        }
     }
 }

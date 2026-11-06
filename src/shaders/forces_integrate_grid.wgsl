@@ -33,9 +33,24 @@ struct GridParams {
     grid_dim: vec3<u32>,
 };
 
+// M5: user-placed obstacles (mouse-ray picked, see app.rs).
+struct Barricade {
+    center: vec3<f32>,
+    half_extents: vec3<f32>,
+};
+
+struct BarricadeListParams {
+    count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
 @group(0) @binding(0) var<uniform> params: SimParams;
 @group(0) @binding(1) var<storage, read> particles_src: array<Particle>;
 @group(0) @binding(2) var<storage, read_write> particles_dst: array<Particle>;
+@group(0) @binding(3) var<uniform> barricade_list: BarricadeListParams;
+@group(0) @binding(4) var<storage, read> barricades: array<Barricade>;
 @group(1) @binding(0) var<uniform> grid: GridParams;
 @group(1) @binding(1) var<storage, read> particle_indices: array<u32>;
 @group(1) @binding(2) var<storage, read> cell_start: array<u32>;
@@ -65,6 +80,39 @@ fn visc_laplacian(r: f32, h: f32) -> f32 {
 fn cell_coord(position: vec3<f32>) -> vec3<i32> {
     let rel = (position - grid.domain_min) / grid.cell_size;
     return vec3<i32>(floor(rel));
+}
+
+// M5: push a particle out of any barricade AABB it's penetrated, along
+// whichever axis has the smallest penetration depth, reflecting that axis's
+// velocity component (same style as the domain-wall collision below).
+fn apply_barricade_collisions(position_in: vec3<f32>, velocity_in: vec3<f32>) -> array<vec3<f32>, 2> {
+    var position = position_in;
+    var velocity = velocity_in;
+    let damping = 0.3;
+    let margin = 0.001;
+
+    for (var b: u32 = 0u; b < barricade_list.count; b = b + 1u) {
+        let bar = barricades[b];
+        let local = position - bar.center;
+        if (abs(local.x) < bar.half_extents.x && abs(local.y) < bar.half_extents.y && abs(local.z) < bar.half_extents.z) {
+            let pen_x = bar.half_extents.x - abs(local.x);
+            let pen_y = bar.half_extents.y - abs(local.y);
+            let pen_z = bar.half_extents.z - abs(local.z);
+
+            if (pen_x <= pen_y && pen_x <= pen_z) {
+                position.x = bar.center.x + sign(local.x) * (bar.half_extents.x + margin);
+                velocity.x = -velocity.x * damping;
+            } else if (pen_y <= pen_x && pen_y <= pen_z) {
+                position.y = bar.center.y + sign(local.y) * (bar.half_extents.y + margin);
+                velocity.y = -velocity.y * damping;
+            } else {
+                position.z = bar.center.z + sign(local.z) * (bar.half_extents.z + margin);
+                velocity.z = -velocity.z * damping;
+            }
+        }
+    }
+
+    return array<vec3<f32>, 2>(position, velocity);
 }
 
 @compute @workgroup_size(64)
@@ -167,6 +215,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         position.z = params.domain_max.z - margin;
         velocity.z = -velocity.z * damping;
     }
+
+    let barricade_result = apply_barricade_collisions(position, velocity);
+    position = barricade_result[0];
+    velocity = barricade_result[1];
 
     var out: Particle;
     out.position = position;

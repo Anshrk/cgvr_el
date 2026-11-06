@@ -33,8 +33,8 @@ scope — lives in this repo's development history / project plan and is summari
 | M0 | Window + wgpu/Metal surface setup | ✅ Done |
 | M1 | Naive O(n²) SPH solver (density/pressure + force/integration), dam-break init, flat-shaded point-sprite debug rendering | ✅ Done |
 | M2 | GPU uniform spatial hash grid + bitonic sort neighbor search (replaces the O(n²) walk at scale) | ✅ Done |
-| M3 | Screen-space fluid rendering (depth splat → bilateral blur → reconstructed normals → shading) + background/ground plane | 🚧 In progress — pipeline built, undergoing visual tuning |
-| M5 | Barricade placement (mouse-ray) + collision | ⏳ Planned |
+| M3 | Screen-space fluid rendering (depth splat → bilateral blur → reconstructed normals → shading) + background/ground plane | ✅ Done — confirmed looking better than the debug view |
+| M5 | Barricade placement (mouse-ray) + collision | ✅ Done |
 | M6 | Vorticity heatmap, Fresnel/refraction, dynamic CFL timestep, on-screen profiling | ⏳ Planned |
 | M4 | Desktop stereo camera (VR-sim) | ⏳ Deprioritized to the end |
 
@@ -49,10 +49,14 @@ The solver advances 8 fixed-`dt` substeps per rendered frame (`SUBSTEPS_PER_FRAM
 `sim/mod.rs`) so simulated time keeps pace with wall-clock time at a small, numerically stable
 timestep, rather than crawling at `dt`-per-frame speed.
 
-Rendering defaults to the M1 debug view (flat-shaded billboard spheres); the full M3 screen-space
-fluid rendering pipeline (depth splat → bilateral blur → reconstructed normals → shading) is
-implemented and runs without errors, but hasn't yet been visually tuned — press **F** at runtime
-to see it and compare against the debug view.
+Rendering defaults to the M1 debug view (flat-shaded billboard spheres); press **F** to switch to
+the M3 screen-space fluid rendering pipeline (depth splat → bilateral blur → reconstructed normals
+→ shading), confirmed to visually read as water rather than loose particles.
+
+Barricades (M5) can be placed at runtime with a right-click: a ray is cast from the camera through
+the cursor, intersected with the domain floor, and a fixed-size box obstacle is placed there — the
+fluid collides with it (and with up to 7 other placed barricades) in the same compute pass as the
+domain-wall collision.
 
 ## Running it
 
@@ -76,8 +80,11 @@ cargo run --release
 |---|---|
 | Left-click + drag | Orbit the camera |
 | Scroll wheel | Zoom in/out |
+| Right-click | Place a barricade (ray-cast onto the floor at the cursor) — up to 8 at once, oldest replaced |
 | `G` | Toggle neighbor-search strategy (grid-accelerated vs. naive O(n²)) — watch the FPS change |
 | `F` | Toggle rendering mode: M1 point-sprite debug view vs. M3 screen-space fluid rendering (SSFR) |
+| `R` | Reset the simulation to its initial dam-break state and clear all barricades |
+| `P` | Pause/resume the simulation (camera controls keep working while paused) |
 
 The app logs particle count, frame time, and basic physics sanity stats (min/max height, max
 speed, max density, NaN count) to stderr roughly once a second, plus densely for the first ~30

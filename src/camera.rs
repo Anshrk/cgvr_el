@@ -37,6 +37,18 @@ impl Camera {
         let up = right.cross(forward).normalize();
         (right, up)
     }
+
+    /// Builds a world-space ray (origin, normalized direction) through a
+    /// point given in NDC coordinates (x, y in [-1, 1]) — used for M5's
+    /// mouse-ray barricade placement, standing in for 6-DOF hand placement
+    /// in a real VR integration.
+    pub fn screen_ray(&self, ndc_x: f32, ndc_y: f32) -> (Vec3, Vec3) {
+        let inv_view_proj = self.view_proj().inverse();
+        // wgpu's NDC Z range is [0, 1]: 0 is the near plane, 1 is the far plane.
+        let near = inv_view_proj.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
+        let far = inv_view_proj.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
+        (near, (far - near).normalize())
+    }
 }
 
 /// Mouse-orbit + scroll-zoom controller around a fixed target point.

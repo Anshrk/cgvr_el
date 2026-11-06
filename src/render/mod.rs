@@ -65,6 +65,10 @@ impl Renderer {
         self.ssfr_enabled
     }
 
+    pub fn rebuild_barricades(&mut self, device: &wgpu::Device, barricades: &[crate::sim::barricade::Barricade]) {
+        self.background.rebuild_barricades(device, barricades);
+    }
+
     pub fn render_frame(
         &self,
         gpu: &GpuContext,

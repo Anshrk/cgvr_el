@@ -1,9 +1,11 @@
+pub mod barricade;
 pub mod grid;
 pub mod params;
 pub mod particle;
 
 use wgpu::util::DeviceExt;
 
+use barricade::{Barricade, BarricadeListParams, MAX_BARRICADES};
 use grid::{bitonic_stage_pairs, BitonicParams, GridInfo, GridParams};
 use params::SimParams;
 use particle::{init_dam_break, Particle};
@@ -68,10 +70,16 @@ pub struct SphSim {
     pub params: SimParams,
     params_buffer: wgpu::Buffer,
     use_grid: bool,
+    spacing: f32,
 
     buffer_a: wgpu::Buffer,
     buffer_b: wgpu::Buffer,
     current_is_a: bool,
+
+    // --- M5: user-placed barricades ---
+    barricades: Vec<Barricade>,
+    barricade_buffer: wgpu::Buffer,
+    barricade_count_buffer: wgpu::Buffer,
 
     // --- M1: naive O(n^2) neighbor search ---
     density_pipeline: wgpu::ComputePipeline,
@@ -140,6 +148,19 @@ impl SphSim {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // ==================== M5: barricades (shared by both integrate paths) ====================
+        let barricade_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("barricades"),
+            size: (MAX_BARRICADES * std::mem::size_of::<Barricade>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let barricade_count_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("barricade-count"),
+            contents: bytemuck::bytes_of(&BarricadeListParams { count: 0, _pad: [0; 3] }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         // ==================== M1: naive O(n^2) ====================
         let density_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("density_pressure"),
@@ -160,7 +181,13 @@ impl SphSim {
         });
         let integrate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("integrate-bgl"),
-            entries: &[uniform_entry(0), storage_entry(1, true), storage_entry(2, false)],
+            entries: &[
+                uniform_entry(0),
+                storage_entry(1, true),
+                storage_entry(2, false),
+                uniform_entry(3),
+                storage_entry(4, true),
+            ],
         });
 
         let density_pipeline_layout =
@@ -215,6 +242,8 @@ impl SphSim {
                 wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: buffer_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: buffer_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: barricade_count_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: barricade_buffer.as_entire_binding() },
             ],
         });
         let integrate_bind_group_b_to_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -224,6 +253,8 @@ impl SphSim {
                 wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: buffer_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: buffer_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: barricade_count_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: barricade_buffer.as_entire_binding() },
             ],
         });
 
@@ -475,10 +506,15 @@ impl SphSim {
             params,
             params_buffer,
             use_grid: true,
+            spacing,
 
             buffer_a,
             buffer_b,
             current_is_a: true,
+
+            barricades: Vec::new(),
+            barricade_buffer,
+            barricade_count_buffer,
 
             density_pipeline,
             integrate_pipeline,
@@ -519,6 +555,57 @@ impl SphSim {
 
     pub fn toggle_neighbor_search(&mut self) {
         self.use_grid = !self.use_grid;
+    }
+
+    pub fn barricades(&self) -> &[Barricade] {
+        &self.barricades
+    }
+
+    /// Resets the simulation to its initial dam-break state (same particle
+    /// count/layout, since spacing/domain don't change at runtime) and
+    /// clears all placed barricades. Triggered by the `R` key.
+    pub fn reset(&mut self, queue: &wgpu::Queue) {
+        let mut params = SimParams::new_dam_break(0, self.spacing);
+        let particles = init_dam_break(&mut params, self.spacing);
+        self.params = params;
+
+        queue.write_buffer(&self.buffer_a, 0, bytemuck::cast_slice(&particles));
+        queue.write_buffer(&self.buffer_b, 0, bytemuck::cast_slice(&particles));
+        self.current_is_a = true;
+
+        self.barricades.clear();
+        queue.write_buffer(
+            &self.barricade_count_buffer,
+            0,
+            bytemuck::bytes_of(&BarricadeListParams { count: 0, _pad: [0; 3] }),
+        );
+    }
+
+    /// Places (or moves, if at capacity — oldest is dropped) a barricade at
+    /// `center` and re-uploads the full barricade list. Cheap/infrequent
+    /// (only called on user placement, not per frame).
+    pub fn place_barricade(&mut self, queue: &wgpu::Queue, center: [f32; 3]) {
+        use barricade::BARRICADE_HALF_EXTENTS;
+
+        if self.barricades.len() >= MAX_BARRICADES {
+            self.barricades.remove(0);
+        }
+        self.barricades.push(Barricade {
+            center,
+            _pad0: 0.0,
+            half_extents: BARRICADE_HALF_EXTENTS,
+            _pad1: 0.0,
+        });
+
+        queue.write_buffer(&self.barricade_buffer, 0, bytemuck::cast_slice(&self.barricades));
+        queue.write_buffer(
+            &self.barricade_count_buffer,
+            0,
+            bytemuck::bytes_of(&BarricadeListParams {
+                count: self.barricades.len() as u32,
+                _pad: [0; 3],
+            }),
+        );
     }
 
     /// The buffer holding the most recently integrated particle state —

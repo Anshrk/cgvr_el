@@ -10,6 +10,7 @@ use winit::window::{Window, WindowId};
 use crate::camera::{Camera, OrbitController};
 use crate::gpu::GpuContext;
 use crate::render::Renderer;
+use crate::sim::barricade::BARRICADE_HALF_EXTENTS;
 use crate::sim::SphSim;
 
 struct Scene {
@@ -20,6 +21,8 @@ struct Scene {
     orbit: OrbitController,
     dragging: bool,
     last_cursor: Option<(f64, f64)>,
+    cursor_pos: (f64, f64),
+    paused: bool,
     last_frame: Instant,
     last_stats_log: Instant,
     frame_index: u64,
@@ -71,6 +74,8 @@ impl ApplicationHandler for App {
             orbit,
             dragging: false,
             last_cursor: None,
+            cursor_pos: (0.0, 0.0),
+            paused: false,
             last_frame: Instant::now(),
             last_stats_log: Instant::now(),
             frame_index: 0,
@@ -105,7 +110,15 @@ impl ApplicationHandler for App {
                     scene.last_cursor = None;
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                place_barricade_at_cursor(scene);
+            }
             WindowEvent::CursorMoved { position, .. } => {
+                scene.cursor_pos = (position.x, position.y);
                 if scene.dragging {
                     if let Some((lx, ly)) = scene.last_cursor {
                         let dx = (position.x - lx) as f32;
@@ -139,6 +152,15 @@ impl ApplicationHandler for App {
                                 if scene.renderer.ssfr_enabled() { "SSFR (M3)" } else { "point-sprite debug (M1)" }
                             );
                         }
+                        if s.as_str().eq_ignore_ascii_case("r") {
+                            scene.sph.reset(&scene.gpu.queue);
+                            scene.renderer.rebuild_barricades(&scene.gpu.device, scene.sph.barricades());
+                            eprintln!("[cgvr] simulation reset");
+                        }
+                        if s.as_str().eq_ignore_ascii_case("p") {
+                            scene.paused = !scene.paused;
+                            eprintln!("[cgvr] {}", if scene.paused { "paused" } else { "resumed" });
+                        }
                     }
                 }
             }
@@ -149,6 +171,31 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
+}
+
+/// Right-click placement: casts a ray from the camera through the cursor
+/// and intersects it with the domain's floor plane, standing in for 6-DOF
+/// hand placement in a real VR integration (see camera.rs's `screen_ray`).
+fn place_barricade_at_cursor(scene: &mut Scene) {
+    let (width, height) = (scene.gpu.config.width as f32, scene.gpu.config.height.max(1) as f32);
+    let ndc_x = (scene.cursor_pos.0 as f32 / width) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (scene.cursor_pos.1 as f32 / height) * 2.0;
+
+    let (origin, dir) = scene.camera.screen_ray(ndc_x, ndc_y);
+    let floor_y = scene.sph.params.domain_min[1];
+    if dir.y.abs() < 1.0e-6 {
+        return;
+    }
+    let t = (floor_y - origin.y) / dir.y;
+    if t <= 0.0 {
+        return;
+    }
+    let hit = origin + dir * t;
+
+    let center = [hit.x, floor_y + BARRICADE_HALF_EXTENTS[1], hit.z];
+    scene.sph.place_barricade(&scene.gpu.queue, center);
+    scene.renderer.rebuild_barricades(&scene.gpu.device, scene.sph.barricades());
+    eprintln!("[cgvr] barricade placed at ({:.2}, {:.2}, {:.2})", center[0], center[1], center[2]);
 }
 
 fn step_and_render(scene: &mut Scene) {
@@ -179,7 +226,9 @@ fn step_and_render(scene: &mut Scene) {
             label: Some("frame-encoder"),
         });
 
-    scene.sph.step(&scene.gpu.queue, &mut encoder);
+    if !scene.paused {
+        scene.sph.step(&scene.gpu.queue, &mut encoder);
+    }
     scene
         .renderer
         .render_frame(&scene.gpu, &mut encoder, &color_view, &scene.sph, &scene.camera);
