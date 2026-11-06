@@ -40,6 +40,7 @@ impl ShadingPipeline {
                 },
                 texture_entry(1),
                 texture_entry(2),
+                texture_entry(3),
             ],
         });
 
@@ -95,6 +96,7 @@ impl ShadingPipeline {
         params_buffer: &wgpu::Buffer,
         depth_view: &wgpu::TextureView,
         normal_view: &wgpu::TextureView,
+        vorticity_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ssfr-shade-bind-group"),
@@ -103,6 +105,7 @@ impl ShadingPipeline {
                 wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(depth_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(normal_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(vorticity_view) },
             ],
         })
     }

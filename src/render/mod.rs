@@ -69,6 +69,14 @@ impl Renderer {
         self.background.rebuild_barricades(device, barricades);
     }
 
+    pub fn toggle_vorticity_heatmap(&mut self) {
+        self.ssfr.toggle_vorticity_heatmap();
+    }
+
+    pub fn vorticity_heatmap_enabled(&self) -> bool {
+        self.ssfr.vorticity_heatmap_enabled()
+    }
+
     pub fn render_frame(
         &self,
         gpu: &GpuContext,

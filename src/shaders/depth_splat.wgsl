@@ -37,6 +37,14 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) quad_uv: vec2<f32>,
     @location(1) view_center_z: f32,
+    // M6: carried straight through to the shading pass (unblurred — it's a
+    // color-coding scalar, not geometry) for the vorticity heatmap.
+    @location(2) vorticity: f32,
+};
+
+struct FragmentOutput {
+    @location(0) depth_out: f32,
+    @location(1) vorticity_out: f32,
 };
 
 const QUAD_CORNERS = array<vec2<f32>, 6>(
@@ -67,11 +75,12 @@ fn vs_main(
     // is the negated view-space Z of the (un-offset) particle center.
     let view_center = camera.view * vec4<f32>(particle.position, 1.0);
     out.view_center_z = -view_center.z;
+    out.vorticity = particle.vorticity;
     return out;
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) f32 {
+fn fs_main(in: VertexOutput) -> FragmentOutput {
     let r2 = dot(in.quad_uv, in.quad_uv);
     if (r2 > 1.0) {
         discard;
@@ -80,5 +89,9 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
     // Analytic sphere profile: pixels nearer the sprite's center are
     // nearer the camera by sqrt(1 - r^2) * radius.
     let z_offset = sqrt(1.0 - r2) * camera.particle_radius;
-    return in.view_center_z - z_offset;
+
+    var out: FragmentOutput;
+    out.depth_out = in.view_center_z - z_offset;
+    out.vorticity_out = in.vorticity;
+    return out;
 }

@@ -164,6 +164,13 @@ impl ApplicationHandler for App {
                         if s.as_str().eq_ignore_ascii_case("q") {
                             event_loop.exit();
                         }
+                        if s.as_str().eq_ignore_ascii_case("v") {
+                            scene.renderer.toggle_vorticity_heatmap();
+                            eprintln!(
+                                "[cgvr] vorticity heatmap: {}",
+                                if scene.renderer.vorticity_heatmap_enabled() { "on" } else { "off" }
+                            );
+                        }
                         if s.as_str().eq_ignore_ascii_case("c") {
                             scene.orbit.reset();
                             eprintln!("[cgvr] camera reset");

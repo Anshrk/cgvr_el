@@ -8,11 +8,13 @@ use wgpu::util::DeviceExt;
 use crate::camera::{Camera, CameraUniform};
 use crate::sim::SphSim;
 use bilateral_blur::BilateralBlurPipeline;
-use depth_splat::{DepthSplatPipeline, DEPTH_TARGET_FORMAT, EMPTY_SENTINEL};
+use depth_splat::{DepthSplatPipeline, DEPTH_TARGET_FORMAT, EMPTY_SENTINEL, VORTICITY_TARGET_FORMAT};
 use normals::{NormalsPipeline, NORMAL_TARGET_FORMAT};
 use shading::ShadingPipeline;
 
-/// Mirrors `GBufferParams` in `normals_from_depth.wgsl` / `ssfr_shade.wgsl`.
+/// Mirrors `GBufferParams` in `normals_from_depth.wgsl` / `ssfr_shade.wgsl`
+/// (the latter also reads `show_vorticity`/`vorticity_scale`; the former
+/// only reads the common prefix up through `empty_sentinel`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GBufferParams {
@@ -20,10 +22,15 @@ pub struct GBufferParams {
     pub aspect: f32,
     pub resolution: [f32; 2],
     pub empty_sentinel: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
+    pub show_vorticity: f32,
+    pub vorticity_scale: f32,
     pub _pad2: f32,
 }
+
+/// Empirically chosen so the heatmap's mid-range lands on the vorticity
+/// magnitudes actually seen near barricade corners/edges in this sim's
+/// parameter regime — not a universal constant.
+const DEFAULT_VORTICITY_SCALE: f32 = 15.0;
 
 struct Targets {
     depth_tex: wgpu::Texture,
@@ -32,6 +39,8 @@ struct Targets {
     blur_tmp_view: wgpu::TextureView,
     normal_tex: wgpu::Texture,
     normal_view: wgpu::TextureView,
+    vorticity_tex: wgpu::Texture,
+    vorticity_view: wgpu::TextureView,
 }
 
 fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
@@ -53,6 +62,7 @@ fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
     let (depth_tex, depth_view) = make("ssfr-depth", DEPTH_TARGET_FORMAT);
     let (blur_tmp_tex, blur_tmp_view) = make("ssfr-blur-tmp", DEPTH_TARGET_FORMAT);
     let (normal_tex, normal_view) = make("ssfr-normal", NORMAL_TARGET_FORMAT);
+    let (vorticity_tex, vorticity_view) = make("ssfr-vorticity", VORTICITY_TARGET_FORMAT);
 
     Targets {
         depth_tex,
@@ -61,6 +71,8 @@ fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
         blur_tmp_view,
         normal_tex,
         normal_view,
+        vorticity_tex,
+        vorticity_view,
     }
 }
 
@@ -79,6 +91,7 @@ pub struct SsfrPipeline {
 
     gbuffer_params: wgpu::Buffer,
     targets: Targets,
+    show_vorticity: bool,
 }
 
 impl SsfrPipeline {
@@ -101,8 +114,8 @@ impl SsfrPipeline {
                 aspect: 1.0,
                 resolution: [width as f32, height as f32],
                 empty_sentinel: EMPTY_SENTINEL,
-                _pad0: 0.0,
-                _pad1: 0.0,
+                show_vorticity: 0.0,
+                vorticity_scale: DEFAULT_VORTICITY_SCALE,
                 _pad2: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -117,11 +130,20 @@ impl SsfrPipeline {
             shading,
             gbuffer_params,
             targets,
+            show_vorticity: false,
         }
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.targets = create_targets(device, width, height);
+    }
+
+    pub fn toggle_vorticity_heatmap(&mut self) {
+        self.show_vorticity = !self.show_vorticity;
+    }
+
+    pub fn vorticity_heatmap_enabled(&self) -> bool {
+        self.show_vorticity
     }
 
     /// Runs the full depth-splat -> blur -> normals -> shading chain.
@@ -149,8 +171,8 @@ impl SsfrPipeline {
                 self.targets.depth_tex.height() as f32,
             ],
             empty_sentinel: EMPTY_SENTINEL,
-            _pad0: 0.0,
-            _pad1: 0.0,
+            show_vorticity: if self.show_vorticity { 1.0 } else { 0.0 },
+            vorticity_scale: DEFAULT_VORTICITY_SCALE,
             _pad2: 0.0,
         };
         queue.write_buffer(&self.gbuffer_params, 0, bytemuck::bytes_of(&gbuffer));
@@ -160,15 +182,23 @@ impl SsfrPipeline {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssfr-depth-splat"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.depth_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: EMPTY_SENTINEL as f64, g: 0.0, b: 0.0, a: 0.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.depth_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: EMPTY_SENTINEL as f64, g: 0.0, b: 0.0, a: 0.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.vorticity_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                        depth_slice: None,
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: shared_depth_view,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
@@ -242,6 +272,7 @@ impl SsfrPipeline {
             &self.gbuffer_params,
             &self.targets.depth_view,
             &self.targets.normal_view,
+            &self.targets.vorticity_view,
         );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

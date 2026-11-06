@@ -3,6 +3,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::CameraUniform;
 
 pub const DEPTH_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+pub const VORTICITY_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 /// Written as the depth-target clear value; bilateral_blur/normals/shading
 /// all treat depth >= this as "no fluid at this pixel".
 pub const EMPTY_SENTINEL: f32 = 1.0e5;
@@ -68,11 +69,18 @@ impl DepthSplatPipeline {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: DEPTH_TARGET_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: DEPTH_TARGET_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: VORTICITY_TARGET_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
