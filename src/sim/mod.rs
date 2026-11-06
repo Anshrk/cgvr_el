@@ -8,7 +8,7 @@ use wgpu::util::DeviceExt;
 use barricade::{Barricade, BarricadeListParams, MAX_BARRICADES};
 use grid::{bitonic_stage_pairs, BitonicParams, GridInfo, GridParams};
 use params::SimParams;
-use particle::{init_dam_break, Particle};
+use particle::{init_dam_break, DamBreakConfig, Particle};
 
 const WORKGROUP_SIZE: u32 = 64;
 const DEFAULT_SUBSTEPS_PER_FRAME: u32 = 8;
@@ -82,7 +82,7 @@ pub struct SphSim {
     pub params: SimParams,
     params_buffer: wgpu::Buffer,
     use_grid: bool,
-    spacing: f32,
+    dam_config: DamBreakConfig,
     substeps_per_frame: u32,
     adaptive_dt: bool,
 
@@ -128,10 +128,9 @@ pub struct SphSim {
 }
 
 impl SphSim {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let spacing = 0.12_f32;
-        let mut params = SimParams::new_dam_break(0, spacing);
-        let particles = init_dam_break(&mut params, spacing);
+    pub fn new(device: &wgpu::Device, dam_config: DamBreakConfig) -> Self {
+        let mut params = SimParams::new_dam_break(0, dam_config.spacing);
+        let particles = init_dam_break(&mut params, &dam_config);
         let particle_count = params.particle_count;
 
         let grid_info = GridInfo::new(
@@ -520,7 +519,7 @@ impl SphSim {
             params,
             params_buffer,
             use_grid: true,
-            spacing,
+            dam_config,
             substeps_per_frame: DEFAULT_SUBSTEPS_PER_FRAME,
             adaptive_dt: true,
 
@@ -573,6 +572,10 @@ impl SphSim {
         self.use_grid = !self.use_grid;
     }
 
+    pub fn dam_config(&self) -> DamBreakConfig {
+        self.dam_config
+    }
+
     pub fn barricades(&self) -> &[Barricade] {
         &self.barricades
     }
@@ -581,8 +584,8 @@ impl SphSim {
     /// count/layout, since spacing/domain don't change at runtime) and
     /// clears all placed barricades. Triggered by the `R` key.
     pub fn reset(&mut self, queue: &wgpu::Queue) {
-        let mut params = SimParams::new_dam_break(0, self.spacing);
-        let particles = init_dam_break(&mut params, self.spacing);
+        let mut params = SimParams::new_dam_break(0, self.dam_config.spacing);
+        let particles = init_dam_break(&mut params, &self.dam_config);
         self.params = params;
 
         queue.write_buffer(&self.buffer_a, 0, bytemuck::cast_slice(&particles));
@@ -817,7 +820,7 @@ impl SphSim {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct ParticleStats {
     pub min_y: f32,
     pub max_y: f32,

@@ -22,6 +22,7 @@ struct SimParams {
     particle_count: u32,
     domain_min: vec3<f32>,
     domain_max: vec3<f32>,
+    cohesion: f32,
 };
 
 struct GridParams {
@@ -129,6 +130,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var pressure_force = vec3<f32>(0.0, 0.0, 0.0);
     var viscosity_force = vec3<f32>(0.0, 0.0, 0.0);
+    var cohesion_force = vec3<f32>(0.0, 0.0, 0.0);
     var vorticity = 0.0;
 
     for (var dz: i32 = -1; dz <= 1; dz = dz + 1) {
@@ -167,6 +169,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     viscosity_force = viscosity_force
                         + params.viscosity * params.particle_mass * (vel_diff / density_j) * visc_laplacian(r, h);
 
+                    // Surface-tension-like cohesion (see forces_integrate.wgsl's
+                    // naive version for the rationale) — identical physics,
+                    // just walked via the grid neighbor loop.
+                    let cohesion_weight = (h - r) / h;
+                    cohesion_force = cohesion_force - params.cohesion * params.particle_mass * cohesion_weight * dir;
+
                     let grad_w = grad_coeff * dir;
                     let curl_term = cross(vel_diff, grad_w) * (params.particle_mass / density_j);
                     vorticity = vorticity + length(curl_term);
@@ -176,7 +184,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let density_safe = max(p_i.density, EPSILON);
-    var acceleration = (pressure_force + viscosity_force) / density_safe;
+    var acceleration = (pressure_force + viscosity_force + cohesion_force) / density_safe;
     acceleration.y = acceleration.y + params.gravity_y;
 
     var velocity = p_i.velocity + acceleration * params.dt;

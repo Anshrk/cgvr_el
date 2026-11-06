@@ -9,9 +9,11 @@ use winit::window::{Window, WindowId};
 
 use crate::camera::{Camera, OrbitController};
 use crate::gpu::GpuContext;
+use crate::render::ui::EguiState;
 use crate::render::Renderer;
 use crate::sim::barricade::BARRICADE_HALF_EXTENTS;
-use crate::sim::SphSim;
+use crate::sim::particle::DamBreakConfig;
+use crate::sim::{ParticleStats, SphSim};
 
 struct Scene {
     gpu: GpuContext,
@@ -25,7 +27,12 @@ struct Scene {
     paused: bool,
     last_frame: Instant,
     last_stats_log: Instant,
+    last_stats: ParticleStats,
+    last_frame_ms: f32,
     frame_index: u64,
+    egui_state: EguiState,
+    ui_config: DamBreakConfig,
+    show_settings: bool,
 }
 
 #[derive(Default)]
@@ -50,8 +57,10 @@ impl ApplicationHandler for App {
         );
 
         let gpu = pollster::block_on(GpuContext::new(window.clone()));
-        let sph = SphSim::new(&gpu.device);
+        let ui_config = DamBreakConfig::default();
+        let sph = SphSim::new(&gpu.device, ui_config);
         let renderer = Renderer::new(&gpu, sph.params.domain_min, sph.params.domain_max);
+        let egui_state = EguiState::new(&gpu.device, &window, gpu.config.format);
 
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
         let camera = Camera {
@@ -78,7 +87,12 @@ impl ApplicationHandler for App {
             paused: false,
             last_frame: Instant::now(),
             last_stats_log: Instant::now(),
+            last_stats: ParticleStats::default(),
+            last_frame_ms: 0.0,
             frame_index: 0,
+            egui_state,
+            ui_config,
+            show_settings: true,
         });
     }
 
@@ -92,6 +106,8 @@ impl ApplicationHandler for App {
             return;
         };
 
+        let egui_consumed = scene.egui_state.handle_event(window, &event);
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(new_size) => {
@@ -104,7 +120,7 @@ impl ApplicationHandler for App {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => {
+            } if !egui_consumed => {
                 scene.dragging = state == ElementState::Pressed;
                 if !scene.dragging {
                     scene.last_cursor = None;
@@ -114,12 +130,15 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } => {
+            } if !egui_consumed => {
                 place_barricade_at_cursor(scene);
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // Always track the cursor position (needed for barricade
+                // placement), but only drive camera orbit when egui isn't
+                // using the drag (e.g. dragging a slider).
                 scene.cursor_pos = (position.x, position.y);
-                if scene.dragging {
+                if scene.dragging && !egui_consumed {
                     if let Some((lx, ly)) = scene.last_cursor {
                         let dx = (position.x - lx) as f32;
                         let dy = (position.y - ly) as f32;
@@ -128,7 +147,7 @@ impl ApplicationHandler for App {
                 }
                 scene.last_cursor = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !egui_consumed => {
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(pos) => (pos.y / 40.0) as f32,
@@ -190,11 +209,14 @@ impl ApplicationHandler for App {
                             scene.sph.adjust_time_scale(-1);
                             eprintln!("[cgvr] time scale: {} substeps/frame", scene.sph.substeps_per_frame());
                         }
+                        if s.as_str().eq_ignore_ascii_case("u") {
+                            scene.show_settings = !scene.show_settings;
+                        }
                     }
                 }
             }
             WindowEvent::RedrawRequested => {
-                step_and_render(scene);
+                step_and_render(scene, window);
                 window.request_redraw();
             }
             _ => {}
@@ -227,7 +249,110 @@ fn place_barricade_at_cursor(scene: &mut Scene) {
     eprintln!("[cgvr] barricade placed at ({:.2}, {:.2}, {:.2})", center[0], center[1], center[2]);
 }
 
-fn step_and_render(scene: &mut Scene) {
+/// Draws the settings panel: live profiling readouts, the keybind
+/// reference, and editable dam-break config with a "Rebuild" button
+/// (particle-count changes need a full `SphSim` rebuild — new buffer
+/// sizes, new grid dims — so they can't be a live drag-slider like the
+/// camera or physics toggles). Returns true if "Rebuild" was clicked.
+fn draw_settings_panel(
+    scene: &mut Scene,
+    window: &Window,
+    color_view: &wgpu::TextureView,
+    encoder: &mut wgpu::CommandEncoder,
+) -> bool {
+    let fps = 1000.0 / scene.last_frame_ms.max(0.001);
+    let frame_ms = scene.last_frame_ms;
+    let particle_count = scene.sph.particle_count();
+    let barricade_count = scene.sph.barricades().len();
+    let using_grid = scene.sph.using_grid();
+    let ssfr_enabled = scene.renderer.ssfr_enabled();
+    let vorticity_on = scene.renderer.vorticity_heatmap_enabled();
+    let adaptive_dt = scene.sph.adaptive_dt_enabled();
+    let dt = scene.sph.params.dt;
+    let substeps = scene.sph.substeps_per_frame();
+    let paused = scene.paused;
+    let stats = scene.last_stats;
+
+    let gpu = &scene.gpu;
+    let ui_config = &mut scene.ui_config;
+    let mut rebuild = false;
+
+    scene.egui_state.render(
+        &gpu.device,
+        &gpu.queue,
+        encoder,
+        window,
+        color_view,
+        gpu.config.width,
+        gpu.config.height,
+        |ctx| {
+            egui::Window::new("CGVR Settings (U to hide)").show(ctx, |ui| {
+                ui.heading("Status");
+                ui.label(format!("FPS: {fps:.0} ({frame_ms:.2} ms/frame)"));
+                ui.label(format!("Particles: {particle_count}"));
+                ui.label(format!("Barricades: {barricade_count} / 8"));
+                ui.label(format!(
+                    "Neighbor search: {}",
+                    if using_grid { "grid (M2)" } else { "naive O(n^2) (M1)" }
+                ));
+                ui.label(format!(
+                    "Render view: {}",
+                    if ssfr_enabled { "SSFR (M3)" } else { "point-sprite debug (M1)" }
+                ));
+                ui.label(format!("Vorticity heatmap: {}", if vorticity_on { "on" } else { "off" }));
+                ui.label(format!(
+                    "Timestep: {dt:.5} ({})",
+                    if adaptive_dt { "adaptive CFL" } else { "fixed" }
+                ));
+                ui.label(format!("Time scale: {substeps} substeps/frame"));
+                ui.label(format!("State: {}", if paused { "paused" } else { "running" }));
+                ui.label(format!(
+                    "Last reading: y=[{:.2},{:.2}] max_speed={:.2} max_density={:.1} nan={}",
+                    stats.min_y, stats.max_y, stats.max_speed, stats.max_density, stats.nan_count
+                ));
+
+                ui.separator();
+                ui.heading("Dam-break config");
+                ui.add(egui::Slider::new(&mut ui_config.spacing, 0.06..=0.25).text("particle spacing"));
+                ui.add(egui::Slider::new(&mut ui_config.width_frac, 0.1..=0.6).text("dam width fraction"));
+                ui.add(egui::Slider::new(&mut ui_config.height_frac, 0.1..=0.9).text("dam height fraction"));
+                ui.label("(smaller spacing = more, denser particles — rebuild to apply)");
+                if ui.button("Rebuild simulation").clicked() {
+                    rebuild = true;
+                }
+
+                ui.separator();
+                ui.heading("Keybinds");
+                egui::Grid::new("keybind-grid").striped(true).show(ui, |ui| {
+                    let rows: &[(&str, &str)] = &[
+                        ("Left-drag", "Orbit camera"),
+                        ("Scroll", "Zoom"),
+                        ("Right-click", "Place barricade"),
+                        ("G", "Toggle neighbor search (grid/naive)"),
+                        ("F", "Toggle render view (SSFR/debug)"),
+                        ("V", "Toggle vorticity heatmap"),
+                        ("D", "Toggle adaptive CFL timestep"),
+                        ("R", "Reset simulation"),
+                        ("P", "Pause/resume"),
+                        ("C", "Reset camera"),
+                        ("+ / -", "Speed up / slow down time scale"),
+                        ("U", "Toggle this panel"),
+                        ("Q", "Quit"),
+                    ];
+                    for (key, action) in rows {
+                        ui.label(*key);
+                        ui.label(*action);
+                        ui.end_row();
+                    }
+                });
+            });
+        },
+    );
+
+    rebuild
+}
+
+fn step_and_render(scene: &mut Scene, window: &Window) {
     scene.orbit.apply(&mut scene.camera);
 
     let surface_texture = match scene.gpu.surface.get_current_texture() {
@@ -262,13 +387,32 @@ fn step_and_render(scene: &mut Scene) {
         .renderer
         .render_frame(&scene.gpu, &mut encoder, &color_view, &scene.sph, &scene.camera);
 
+    let rebuild_requested = if scene.show_settings {
+        Some(draw_settings_panel(scene, window, &color_view, &mut encoder))
+    } else {
+        None
+    };
+
     scene.gpu.queue.submit(Some(encoder.finish()));
     scene.gpu.queue.present(surface_texture);
+
+    if rebuild_requested == Some(true) {
+        scene.sph = SphSim::new(&scene.gpu.device, scene.ui_config);
+        scene.renderer.rebuild_barricades(&scene.gpu.device, &[]);
+        eprintln!(
+            "[cgvr] simulation rebuilt: {} particles (spacing={:.3}, width_frac={:.2}, height_frac={:.2})",
+            scene.sph.particle_count(),
+            scene.ui_config.spacing,
+            scene.ui_config.width_frac,
+            scene.ui_config.height_frac,
+        );
+    }
 
     scene.frame_index += 1;
     let now = Instant::now();
     let frame_ms = (now - scene.last_frame).as_secs_f32() * 1000.0;
     scene.last_frame = now;
+    scene.last_frame_ms = frame_ms;
     let early_frame = scene.frame_index <= 30 && scene.frame_index % 2 == 0;
     if early_frame || (now - scene.last_stats_log).as_secs_f32() > 1.0 {
         scene.last_stats_log = now;
@@ -286,5 +430,6 @@ fn step_and_render(scene: &mut Scene) {
             scene.sph.params.dt,
             stats.nan_count,
         );
+        scene.last_stats = stats;
     }
 }

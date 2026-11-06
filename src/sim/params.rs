@@ -17,8 +17,20 @@ pub struct SimParams {
     pub domain_min: [f32; 3],
     pub _pad0: f32,
     pub domain_max: [f32; 3],
-    pub _pad1: f32,
+    // Short-range attraction between neighbors (surface-tension-like
+    // cohesion) — without this, SPH water behaves like a spray of
+    // independent particles instead of sticking into sheets/droplets.
+    // Packs into the same 16-byte slot as domain_max (trailing-scalar-
+    // after-vec3), so WGSL's struct size stays 64 bytes, not 80 — verify
+    // with the layout arithmetic in forces_integrate.wgsl's comment before
+    // adding more fields here.
+    pub cohesion: f32,
 }
+
+// WGSL's SimParams struct (as declared in forces_integrate*.wgsl) strides
+// at 64 bytes; a mismatch here silently corrupts every kernel reading this
+// buffer.
+const _: () = assert!(std::mem::size_of::<SimParams>() == 64);
 
 impl SimParams {
     pub fn new_dam_break(particle_count: u32, spacing: f32) -> Self {
@@ -38,7 +50,7 @@ impl SimParams {
             domain_min: [-5.0, 0.0, -3.0],
             _pad0: 0.0,
             domain_max: [5.0, 6.0, 3.0],
-            _pad1: 0.0,
+            cohesion: 20.0,
         }
     }
 }

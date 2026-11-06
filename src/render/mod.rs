@@ -1,6 +1,7 @@
 pub mod background;
 pub mod point_sprite;
 pub mod ssfr;
+pub mod ui;
 
 use crate::camera::{Camera, CameraUniform};
 use crate::gpu::GpuContext;
