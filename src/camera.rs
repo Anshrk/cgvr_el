@@ -89,17 +89,24 @@ pub struct CameraUniform {
     pub particle_radius: f32,
     pub camera_up: [f32; 3],
     pub _pad: f32,
+    // Trailing field: only depth_splat.wgsl (and later SSFR shaders) read
+    // this. Other shaders' WGSL CameraUniform copies simply don't declare
+    // it, which is fine — WGSL only reads the prefix of the buffer a given
+    // struct declares.
+    pub view: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
     pub fn from_camera(camera: &Camera, particle_radius: f32) -> Self {
         let (right, up) = camera.right_up();
+        let view = glam::camera::rh::view::look_at_mat4(camera.eye, camera.target, camera.up);
         Self {
             view_proj: camera.view_proj().to_cols_array_2d(),
             camera_right: right.to_array(),
             particle_radius,
             camera_up: up.to_array(),
             _pad: 0.0,
+            view: view.to_cols_array_2d(),
         }
     }
 }

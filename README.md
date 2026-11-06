@@ -33,7 +33,7 @@ scope — lives in this repo's development history / project plan and is summari
 | M0 | Window + wgpu/Metal surface setup | ✅ Done |
 | M1 | Naive O(n²) SPH solver (density/pressure + force/integration), dam-break init, flat-shaded point-sprite debug rendering | ✅ Done |
 | M2 | GPU uniform spatial hash grid + bitonic sort neighbor search (replaces the O(n²) walk at scale) | ✅ Done |
-| M3 | Screen-space fluid rendering (depth splat → bilateral blur → reconstructed normals → shading) + background/ground plane | 🚧 In progress |
+| M3 | Screen-space fluid rendering (depth splat → bilateral blur → reconstructed normals → shading) + background/ground plane | 🚧 In progress — pipeline built, undergoing visual tuning |
 | M5 | Barricade placement (mouse-ray) + collision | ⏳ Planned |
 | M6 | Vorticity heatmap, Fresnel/refraction, dynamic CFL timestep, on-screen profiling | ⏳ Planned |
 | M4 | Desktop stereo camera (VR-sim) | ⏳ Deprioritized to the end |
@@ -45,8 +45,14 @@ measurably faster — benchmarked at **~1.5× at 19k particles, ~10.5× at 53k p
 timing; see `src/app.rs` for the measurement methodology). Press **G** at runtime to toggle
 between the two neighbor-search strategies and see this difference live.
 
-Current rendering is still the M1 debug view (flat-shaded billboard spheres) — it is intentionally
-not the final look. M3 is what turns this into something that visually reads as water.
+The solver advances 8 fixed-`dt` substeps per rendered frame (`SUBSTEPS_PER_FRAME` in
+`sim/mod.rs`) so simulated time keeps pace with wall-clock time at a small, numerically stable
+timestep, rather than crawling at `dt`-per-frame speed.
+
+Rendering defaults to the M1 debug view (flat-shaded billboard spheres); the full M3 screen-space
+fluid rendering pipeline (depth splat → bilateral blur → reconstructed normals → shading) is
+implemented and runs without errors, but hasn't yet been visually tuned — press **F** at runtime
+to see it and compare against the debug view.
 
 ## Running it
 
@@ -71,6 +77,7 @@ cargo run --release
 | Left-click + drag | Orbit the camera |
 | Scroll wheel | Zoom in/out |
 | `G` | Toggle neighbor-search strategy (grid-accelerated vs. naive O(n²)) — watch the FPS change |
+| `F` | Toggle rendering mode: M1 point-sprite debug view vs. M3 screen-space fluid rendering (SSFR) |
 
 The app logs particle count, frame time, and basic physics sanity stats (min/max height, max
 speed, max density, NaN count) to stderr roughly once a second, plus densely for the first ~30
@@ -85,7 +92,10 @@ src/
   gpu.rs           — wgpu instance/adapter/device/surface setup
   camera.rs        — orbit camera + billboard camera uniform
   sim/             — SPH solver: particle buffers, compute pipelines (naive + grid), dam-break init
-  render/          — render passes (currently: M1 debug point-sprite view)
+  render/
+    background.rs  — ground plane + boundary wall geometry (opaque pass)
+    point_sprite.rs— M1 debug view: flat-shaded billboard spheres
+    ssfr/          — M3 screen-space fluid rendering: depth_splat, bilateral_blur, normals, shading
   shaders/         — all WGSL compute + render shaders
 ```
 
@@ -93,6 +103,12 @@ Each neighbor-search strategy (naive vs. grid) has its own WGSL shader pair
 (`density_pressure.wgsl` / `forces_integrate.wgsl` vs. `density_pressure_grid.wgsl` /
 `forces_integrate_grid.wgsl`) implementing identical SPH physics — they only differ in how
 neighbors are found, which is what makes the M1-vs-M2 performance comparison meaningful.
+
+The `Particle` struct (`sim/particle.rs`) has a compile-time assertion that it's exactly 48
+bytes — WGSL's implicit struct padding rules (every `vec3<f32>` aligns to 16 bytes, even as a
+struct's last field) don't always match Rust's natural layout, and a silent mismatch there
+corrupts every particle read on the GPU side. If you change that struct's fields, update the
+matching WGSL `struct Particle` in every shader that uses it and re-check the byte layout by hand.
 
 ## Why Rust + wgpu instead of CUDA/C++
 

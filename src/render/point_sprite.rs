@@ -101,6 +101,7 @@ impl PointSpritePipeline {
                 particle_radius: 0.08,
                 camera_up: [0.0, 1.0, 0.0],
                 _pad: 0.0,
+                view: glam::Mat4::IDENTITY.to_cols_array_2d(),
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });

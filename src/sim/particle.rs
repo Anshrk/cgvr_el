@@ -16,6 +16,9 @@ pub struct Particle {
     pub _pad: [f32; 3],
 }
 
+// WGSL's Particle struct strides at 48 bytes; a mismatch silently corrupts every kernel.
+const _: () = assert!(std::mem::size_of::<Particle>() == 48);
+
 /// Fills a block near one side of the domain (a "dam") with a jittered
 /// regular lattice of particles, standing in for the collapsing water column
 /// in the dam-break scenario. Returns the generated particles; `params` is

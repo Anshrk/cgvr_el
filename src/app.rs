@@ -132,6 +132,13 @@ impl ApplicationHandler for App {
                                 if scene.sph.using_grid() { "grid (M2)" } else { "naive (M1)" }
                             );
                         }
+                        if s.as_str().eq_ignore_ascii_case("f") {
+                            scene.renderer.toggle_ssfr();
+                            eprintln!(
+                                "[cgvr] render view: {}",
+                                if scene.renderer.ssfr_enabled() { "SSFR (M3)" } else { "point-sprite debug (M1)" }
+                            );
+                        }
                     }
                 }
             }

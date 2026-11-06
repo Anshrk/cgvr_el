@@ -1,23 +1,28 @@
 pub mod background;
 pub mod point_sprite;
+pub mod ssfr;
 
 use crate::camera::{Camera, CameraUniform};
 use crate::gpu::GpuContext;
 use crate::sim::SphSim;
 use background::BackgroundPipeline;
 use point_sprite::PointSpritePipeline;
+use ssfr::SsfrPipeline;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Owns the depth buffer and the render passes, and draws one frame.
 ///
-/// M1 only runs the point-sprite debug pass; M3 adds the background/tank
-/// geometry and (next) the full SSFR pass chain here alongside it
-/// (point-sprite stays as a toggleable debug view).
+/// The background/tank pass always runs first into a shared depth buffer.
+/// After that, either the M1 point-sprite debug view or the M3 SSFR pass
+/// chain runs (toggleable via `toggle_ssfr` — SSFR is new and unverified
+/// visually, so it defaults off until confirmed to look right).
 pub struct Renderer {
     depth_view: wgpu::TextureView,
     background: BackgroundPipeline,
     point_sprite: PointSpritePipeline,
+    ssfr: SsfrPipeline,
+    ssfr_enabled: bool,
 }
 
 impl Renderer {
@@ -31,15 +36,33 @@ impl Renderer {
             domain_max,
         );
         let point_sprite = PointSpritePipeline::new(&gpu.device, gpu.config.format, DEPTH_FORMAT);
+        let ssfr = SsfrPipeline::new(
+            &gpu.device,
+            gpu.config.format,
+            DEPTH_FORMAT,
+            gpu.config.width,
+            gpu.config.height,
+        );
         Self {
             depth_view,
             background,
             point_sprite,
+            ssfr,
+            ssfr_enabled: false,
         }
     }
 
     pub fn resize(&mut self, gpu: &GpuContext) {
         self.depth_view = create_depth_view(gpu);
+        self.ssfr.resize(&gpu.device, gpu.config.width, gpu.config.height);
+    }
+
+    pub fn toggle_ssfr(&mut self) {
+        self.ssfr_enabled = !self.ssfr_enabled;
+    }
+
+    pub fn ssfr_enabled(&self) -> bool {
+        self.ssfr_enabled
     }
 
     pub fn render_frame(
@@ -52,43 +75,68 @@ impl Renderer {
     ) {
         let camera_uniform = CameraUniform::from_camera(camera, 0.08);
         self.background.update_camera(&gpu.queue, &camera_uniform);
-        self.point_sprite.update_camera(&gpu.queue, &camera_uniform);
-        let bind_group = self
-            .point_sprite
-            .create_bind_group(&gpu.device, sph.current_buffer());
 
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("main-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: color_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.02,
-                        g: 0.05,
-                        b: 0.1,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
+        // Background pass: always first, establishes the depth buffer that
+        // either the debug or SSFR pass below tests/loads against.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("background-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.05, b: 0.1, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.background.draw(&mut pass);
+        }
 
-        self.background.draw(&mut render_pass);
-        self.point_sprite
-            .draw(&mut render_pass, &bind_group, sph.particle_count());
+        if self.ssfr_enabled {
+            self.ssfr.render(
+                &gpu.device,
+                &gpu.queue,
+                encoder,
+                color_view,
+                &self.depth_view,
+                sph,
+                camera,
+            );
+        } else {
+            self.point_sprite.update_camera(&gpu.queue, &camera_uniform);
+            let bind_group = self
+                .point_sprite
+                .create_bind_group(&gpu.device, sph.current_buffer());
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("point-sprite-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.point_sprite.draw(&mut pass, &bind_group, sph.particle_count());
+        }
     }
 }
 

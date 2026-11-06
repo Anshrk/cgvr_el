@@ -9,6 +9,7 @@ use params::SimParams;
 use particle::{init_dam_break, Particle};
 
 const WORKGROUP_SIZE: u32 = 64;
+const SUBSTEPS_PER_FRAME: u32 = 8;
 
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -530,9 +531,16 @@ impl SphSim {
         }
     }
 
+    /// Advances the sim by `SUBSTEPS_PER_FRAME` fixed-`dt` substeps so simulated
+    /// time keeps pace with wall-clock time at a stable small dt.
     pub fn step(&mut self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&self.params));
+        for _ in 0..SUBSTEPS_PER_FRAME {
+            self.substep(encoder);
+        }
+    }
 
+    fn substep(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let workgroups = self.params.particle_count.div_ceil(WORKGROUP_SIZE);
 
         if self.use_grid {
