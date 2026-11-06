@@ -35,7 +35,7 @@ scope — lives in this repo's development history / project plan and is summari
 | M2 | GPU uniform spatial hash grid + bitonic sort neighbor search (replaces the O(n²) walk at scale) | ✅ Done |
 | M3 | Screen-space fluid rendering (depth splat → bilateral blur → reconstructed normals → shading) + background/ground plane | ✅ Done — confirmed looking better than the debug view |
 | M5 | Barricade placement (mouse-ray) + collision | ✅ Done |
-| M6 | Vorticity heatmap ✅ done; Fresnel/refraction, dynamic CFL timestep, on-screen profiling still planned | 🚧 In progress |
+| M6 | Vorticity heatmap ✅, dynamic CFL timestep ✅ done; Fresnel/refraction, on-screen profiling still planned | 🚧 In progress |
 | M4 | Desktop stereo camera (VR-sim) | ⏳ Deprioritized to the end |
 
 **Validated so far:** the SPH solver is physically stable (dam-break column collapses, hits the
@@ -89,6 +89,7 @@ cargo run --release
 | `+` / `-` | Speed up / slow down the simulation's time scale (substeps per rendered frame) |
 | `Q` | Quit |
 | `V` | Toggle the vorticity heatmap overlay (SSFR view only — press `F` first) |
+| `D` | Toggle dynamic CFL timestep vs. fixed dt — watch `dt` in the log shrink during a fast splash |
 
 The app logs particle count, frame time, and basic physics sanity stats (min/max height, max
 speed, max density, NaN count) to stderr roughly once a second, plus densely for the first ~30

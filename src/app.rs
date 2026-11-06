@@ -164,6 +164,13 @@ impl ApplicationHandler for App {
                         if s.as_str().eq_ignore_ascii_case("q") {
                             event_loop.exit();
                         }
+                        if s.as_str().eq_ignore_ascii_case("d") {
+                            scene.sph.toggle_adaptive_dt();
+                            eprintln!(
+                                "[cgvr] adaptive CFL dt: {}",
+                                if scene.sph.adaptive_dt_enabled() { "on" } else { "off (fixed dt)" }
+                            );
+                        }
                         if s.as_str().eq_ignore_ascii_case("v") {
                             scene.renderer.toggle_vorticity_heatmap();
                             eprintln!(
@@ -266,8 +273,9 @@ fn step_and_render(scene: &mut Scene) {
     if early_frame || (now - scene.last_stats_log).as_secs_f32() > 1.0 {
         scene.last_stats_log = now;
         let stats = scene.sph.debug_stats(&scene.gpu.device, &scene.gpu.queue);
+        scene.sph.update_cfl_dt(stats.max_speed);
         eprintln!(
-            "[cgvr] particles={} frame={:.2}ms (~{:.0} FPS) y=[{:.2},{:.2}] max_speed={:.2} max_density={:.1} nan={}",
+            "[cgvr] particles={} frame={:.2}ms (~{:.0} FPS) y=[{:.2},{:.2}] max_speed={:.2} max_density={:.1} dt={:.5} nan={}",
             scene.sph.particle_count(),
             frame_ms,
             1000.0 / frame_ms.max(0.001),
@@ -275,6 +283,7 @@ fn step_and_render(scene: &mut Scene) {
             stats.max_y,
             stats.max_speed,
             stats.max_density,
+            scene.sph.params.dt,
             stats.nan_count,
         );
     }

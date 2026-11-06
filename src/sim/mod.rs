@@ -13,6 +13,18 @@ use particle::{init_dam_break, Particle};
 const WORKGROUP_SIZE: u32 = 64;
 const DEFAULT_SUBSTEPS_PER_FRAME: u32 = 8;
 
+// M6: dynamic CFL timestep, dt = clamp(CFL_NUMBER * h / max_speed, DT_MIN, DT_MAX).
+// Updated on the existing periodic debug-stats readback cadence (~once/sec,
+// or densely for the first ~30 frames — see App), not a per-frame GPU
+// reduction: this sim's real stability limit is the SPH pressure stiffness
+// term, not pure velocity advection, so a coarser update is enough to show
+// dt actually shrink during a fast splash without adding a whole new GPU
+// reduction + non-blocking-readback pipeline for a mostly-cosmetic gain.
+// DT_MAX matches the fixed dt already validated stable at this stiffness.
+const CFL_NUMBER: f32 = 0.02;
+const DT_MIN: f32 = 0.0002;
+const DT_MAX: f32 = 0.001;
+
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -72,6 +84,7 @@ pub struct SphSim {
     use_grid: bool,
     spacing: f32,
     substeps_per_frame: u32,
+    adaptive_dt: bool,
 
     buffer_a: wgpu::Buffer,
     buffer_b: wgpu::Buffer,
@@ -509,6 +522,7 @@ impl SphSim {
             use_grid: true,
             spacing,
             substeps_per_frame: DEFAULT_SUBSTEPS_PER_FRAME,
+            adaptive_dt: true,
 
             buffer_a,
             buffer_b,
@@ -639,6 +653,28 @@ impl SphSim {
     pub fn adjust_time_scale(&mut self, delta: i32) {
         let new_value = self.substeps_per_frame as i32 + delta;
         self.substeps_per_frame = new_value.clamp(1, 32) as u32;
+    }
+
+    pub fn adaptive_dt_enabled(&self) -> bool {
+        self.adaptive_dt
+    }
+
+    pub fn toggle_adaptive_dt(&mut self) {
+        self.adaptive_dt = !self.adaptive_dt;
+        if !self.adaptive_dt {
+            self.params.dt = DT_MAX;
+        }
+    }
+
+    /// Updates `dt` from the CFL condition given the current max particle
+    /// speed (from the periodic `debug_stats` readback). No-op if adaptive
+    /// dt is toggled off (fixed `DT_MAX` is used instead). Bound to `D`.
+    pub fn update_cfl_dt(&mut self, max_speed: f32) {
+        if !self.adaptive_dt {
+            return;
+        }
+        let h = self.params.smoothing_radius;
+        self.params.dt = (CFL_NUMBER * h / max_speed.max(1.0e-4)).clamp(DT_MIN, DT_MAX);
     }
 
     fn substep(&mut self, encoder: &mut wgpu::CommandEncoder) {
