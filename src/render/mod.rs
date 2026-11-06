@@ -1,27 +1,39 @@
+pub mod background;
 pub mod point_sprite;
 
 use crate::camera::{Camera, CameraUniform};
 use crate::gpu::GpuContext;
 use crate::sim::SphSim;
+use background::BackgroundPipeline;
 use point_sprite::PointSpritePipeline;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Owns the depth buffer and the render passes, and draws one frame.
 ///
-/// M1 only runs the point-sprite debug pass; M3 adds the full SSFR pass
-/// chain here alongside it (point-sprite stays as a toggleable debug view).
+/// M1 only runs the point-sprite debug pass; M3 adds the background/tank
+/// geometry and (next) the full SSFR pass chain here alongside it
+/// (point-sprite stays as a toggleable debug view).
 pub struct Renderer {
     depth_view: wgpu::TextureView,
+    background: BackgroundPipeline,
     point_sprite: PointSpritePipeline,
 }
 
 impl Renderer {
-    pub fn new(gpu: &GpuContext) -> Self {
+    pub fn new(gpu: &GpuContext, domain_min: [f32; 3], domain_max: [f32; 3]) -> Self {
         let depth_view = create_depth_view(gpu);
+        let background = BackgroundPipeline::new(
+            &gpu.device,
+            gpu.config.format,
+            DEPTH_FORMAT,
+            domain_min,
+            domain_max,
+        );
         let point_sprite = PointSpritePipeline::new(&gpu.device, gpu.config.format, DEPTH_FORMAT);
         Self {
             depth_view,
+            background,
             point_sprite,
         }
     }
@@ -39,6 +51,7 @@ impl Renderer {
         camera: &Camera,
     ) {
         let camera_uniform = CameraUniform::from_camera(camera, 0.08);
+        self.background.update_camera(&gpu.queue, &camera_uniform);
         self.point_sprite.update_camera(&gpu.queue, &camera_uniform);
         let bind_group = self
             .point_sprite
@@ -73,6 +86,7 @@ impl Renderer {
             multiview_mask: None,
         });
 
+        self.background.draw(&mut render_pass);
         self.point_sprite
             .draw(&mut render_pass, &bind_group, sph.particle_count());
     }

@@ -47,8 +47,8 @@ impl ApplicationHandler for App {
         );
 
         let gpu = pollster::block_on(GpuContext::new(window.clone()));
-        let renderer = Renderer::new(&gpu);
         let sph = SphSim::new(&gpu.device);
+        let renderer = Renderer::new(&gpu, sph.params.domain_min, sph.params.domain_max);
 
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
         let camera = Camera {
