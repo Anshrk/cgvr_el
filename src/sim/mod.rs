@@ -794,6 +794,29 @@ impl SphSim {
                     d.gpu.velocity[axis] += impulse[axis] / mass + gravity[axis] * dt_total;
                 }
 
+                // Safety clamp + light per-frame damping: a transient
+                // overlap configuration (many particles contacting the
+                // object across a whole frame's substeps before its
+                // position updates) can otherwise spike the accumulated
+                // impulse into a jarring single-frame velocity jump —
+                // same robustness-net philosophy as the particle solver's
+                // own `max_speed` clamp in forces_integrate*.wgsl.
+                const MAX_DEBRIS_SPEED: f32 = 6.0;
+                const DEBRIS_DAMPING: f32 = 0.98;
+                let speed = (d.gpu.velocity[0] * d.gpu.velocity[0]
+                    + d.gpu.velocity[1] * d.gpu.velocity[1]
+                    + d.gpu.velocity[2] * d.gpu.velocity[2])
+                    .sqrt();
+                if speed > MAX_DEBRIS_SPEED {
+                    let scale = MAX_DEBRIS_SPEED / speed;
+                    for axis in 0..3 {
+                        d.gpu.velocity[axis] *= scale;
+                    }
+                }
+                for axis in 0..3 {
+                    d.gpu.velocity[axis] *= DEBRIS_DAMPING;
+                }
+
                 for axis in 0..3 {
                     d.gpu.center[axis] += d.gpu.velocity[axis] * dt_total;
                 }

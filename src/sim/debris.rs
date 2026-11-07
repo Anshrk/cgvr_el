@@ -79,7 +79,13 @@ impl DebrisState {
 pub fn spawn_layout(domain_min: [f32; 3], domain_max: [f32; 3]) -> Vec<DebrisState> {
     let floor_y = domain_min[1];
     let half_y = DEBRIS_HALF_EXTENTS[1];
-    let mass = 2.0_f32;
+    // Heavier than a naive "crate" guess: with many SPH particles able to
+    // overlap a small (0.2 half-extent) box across a whole frame's worth of
+    // substeps before its position updates, the accumulated impulse can
+    // spike large relative to mass, causing jarring per-frame velocity
+    // jumps rather than a smooth push. More inertia + the speed clamp/
+    // damping in `update_debris_from_gpu` are the fix.
+    let mass = 8.0_f32;
 
     let x_span = domain_max[0] - domain_min[0];
     let z_span = domain_max[2] - domain_min[2];
