@@ -13,3 +13,4 @@ rand       = "0.10"
 egui       = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu  = "0.37"
 egui-winit = "0.37"
+egui_plot = "0.38.0"

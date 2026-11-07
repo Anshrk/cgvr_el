@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,7 +45,13 @@ struct Scene {
     /// `DebrisKind::force_thresholds` — see the "Flood Impact" settings
     /// panel section.
     force_thresholds: crate::sim::debris::ForceThresholds,
+    /// (sim_time, destroyed_count, damaged_count) sampled at the same ~1 Hz
+    /// cadence as the stats log, for the Flood Impact panel's time-series
+    /// graph. Capped so a long-running demo doesn't grow this unbounded.
+    destruction_history: VecDeque<(f32, u32, u32)>,
 }
+
+const MAX_DESTRUCTION_HISTORY: usize = 600;
 
 #[derive(Default)]
 pub struct App {
@@ -106,6 +113,7 @@ impl ApplicationHandler for App {
             show_settings: true,
             settings_panel_rect: None,
             force_thresholds: crate::sim::debris::ForceThresholds::default(),
+            destruction_history: VecDeque::new(),
         });
     }
 
@@ -205,6 +213,7 @@ impl ApplicationHandler for App {
                         if s.as_str().eq_ignore_ascii_case("r") {
                             scene.sph.reset(&scene.gpu.queue);
                             scene.renderer.rebuild_barricades(&scene.gpu.device, scene.sph.barricades());
+                            scene.destruction_history.clear();
                             eprintln!("[cgvr] simulation reset");
                         }
                         if s.as_str().eq_ignore_ascii_case("p") {
@@ -325,6 +334,7 @@ fn draw_settings_panel(
     debris_by_distance
         .sort_by(|a, b| a.distance_from_dam(domain_min).total_cmp(&b.distance_from_dam(domain_min)));
 
+    let destruction_history = &scene.destruction_history;
     let gpu = &scene.gpu;
     let ui_config = &mut scene.ui_config;
     let force_thresholds = &mut scene.force_thresholds;
@@ -411,6 +421,31 @@ fn draw_settings_panel(
                                 ui.add(egui::DragValue::new(&mut pair.1).speed(50.0).range(pair.0..=100000.0));
                             });
                         }
+
+                        ui.add_space(4.0);
+                        ui.label("Destroyed / damaged over time:");
+                        let destroyed_pts: egui_plot::PlotPoints = destruction_history
+                            .iter()
+                            .map(|&(t, d, _)| [t as f64, d as f64])
+                            .collect();
+                        let damaged_pts: egui_plot::PlotPoints = destruction_history
+                            .iter()
+                            .map(|&(t, _, dmg)| [t as f64, dmg as f64])
+                            .collect();
+                        egui_plot::Plot::new("destruction-history-plot")
+                            .height(120.0)
+                            .show_axes([true, true])
+                            .allow_scroll(false)
+                            .show(ui, |plot_ui| {
+                                plot_ui.line(
+                                    egui_plot::Line::new("Destroyed", destroyed_pts)
+                                        .color(egui::Color32::from_rgb(200, 60, 60)),
+                                );
+                                plot_ui.line(
+                                    egui_plot::Line::new("Damaged", damaged_pts)
+                                        .color(egui::Color32::from_rgb(220, 180, 60)),
+                                );
+                            });
                     });
 
                     egui::CollapsingHeader::new("Dam-break config").default_open(true).show(ui, |ui| {
@@ -515,6 +550,7 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
     if rebuild_requested == Some(true) {
         scene.sph = SphSim::new(&scene.gpu.device, scene.ui_config);
         scene.renderer.rebuild_barricades(&scene.gpu.device, &[]);
+        scene.destruction_history.clear();
         eprintln!(
             "[cgvr] simulation rebuilt: {} particles (spacing={:.3}, width_frac={:.2}, height_frac={:.2})",
             scene.sph.particle_count(),
@@ -558,6 +594,23 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
                 d.peak_force,
                 d.destruction_status(&scene.force_thresholds),
             );
+        }
+
+        let destroyed = scene
+            .sph
+            .debris()
+            .iter()
+            .filter(|d| d.destruction_status(&scene.force_thresholds) == crate::sim::debris::DestructionStatus::Destroyed)
+            .count() as u32;
+        let damaged = scene
+            .sph
+            .debris()
+            .iter()
+            .filter(|d| d.destruction_status(&scene.force_thresholds) == crate::sim::debris::DestructionStatus::Damaged)
+            .count() as u32;
+        scene.destruction_history.push_back((scene.sph.sim_time(), destroyed, damaged));
+        if scene.destruction_history.len() > MAX_DESTRUCTION_HISTORY {
+            scene.destruction_history.pop_front();
         }
     }
 }

@@ -87,6 +87,11 @@ pub struct SphSim {
     dam_config: DamBreakConfig,
     substeps_per_frame: u32,
     adaptive_dt: bool,
+    /// Total simulated time elapsed (sum of every substep's `dt`), not
+    /// wall-clock time — used by the settings panel's destruction-over-time
+    /// graph so its X axis tracks the sim, not real seconds (which drift
+    /// relative to it whenever substeps-per-frame or dt changes).
+    sim_time: f32,
 
     buffer_a: wgpu::Buffer,
     buffer_b: wgpu::Buffer,
@@ -579,6 +584,7 @@ impl SphSim {
             dam_config,
             substeps_per_frame: DEFAULT_SUBSTEPS_PER_FRAME,
             adaptive_dt: true,
+            sim_time: 0.0,
 
             buffer_a,
             buffer_b,
@@ -655,6 +661,7 @@ impl SphSim {
         let mut params = SimParams::new_dam_break(0, self.dam_config.spacing);
         let particles = init_dam_break(&mut params, &self.dam_config);
         self.params = params;
+        self.sim_time = 0.0;
 
         queue.write_buffer(&self.buffer_a, 0, bytemuck::cast_slice(&particles));
         queue.write_buffer(&self.buffer_b, 0, bytemuck::cast_slice(&particles));
@@ -740,6 +747,7 @@ impl SphSim {
         for _ in 0..self.substeps_per_frame {
             self.substep(encoder);
         }
+        self.sim_time += self.substeps_per_frame as f32 * self.params.dt;
 
         encoder.copy_buffer_to_buffer(
             &self.debris_force_accum_buffer,
@@ -854,6 +862,10 @@ impl SphSim {
         self.debris_force_staging_buffer.unmap();
 
         self.upload_debris(queue);
+    }
+
+    pub fn sim_time(&self) -> f32 {
+        self.sim_time
     }
 
     pub fn substeps_per_frame(&self) -> u32 {
