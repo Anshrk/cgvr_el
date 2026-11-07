@@ -692,6 +692,18 @@ impl SphSim {
         );
     }
 
+    /// Places (or moves, if at capacity — oldest is dropped) a new debris
+    /// object of `kind` at `center`, mirroring `place_barricade`. The
+    /// user-placement extension point left open by M7's design: pre-placed
+    /// debris and this both just push into the same fixed-capacity array.
+    pub fn place_debris(&mut self, queue: &wgpu::Queue, center: [f32; 3], kind: debris::DebrisKind) {
+        if self.debris.len() >= MAX_DEBRIS {
+            self.debris.remove(0);
+        }
+        self.debris.push(DebrisState::new(center, kind));
+        self.upload_debris(queue);
+    }
+
     /// Places (or moves, if at capacity — oldest is dropped) a barricade at
     /// `center` and re-uploads the full barricade list. Cheap/infrequent
     /// (only called on user placement, not per frame).

@@ -86,6 +86,8 @@ cargo run --release
 | Left-click + drag | Orbit the camera |
 | Scroll wheel | Zoom in/out |
 | Right-click | Place a barricade (ray-cast onto the floor at the cursor) — up to 8 at once, oldest replaced |
+| `1` / `2` / `3` | Select Crate / Tree / House as the next debris kind to place |
+| Middle-click | Place the selected debris kind (ray-cast onto the floor) — up to 16 at once, oldest replaced |
 | `G` | Toggle neighbor-search strategy (grid-accelerated vs. naive O(n²)) — watch the FPS change |
 | `F` | Toggle rendering mode: M1 point-sprite debug view vs. M3 screen-space fluid rendering (SSFR) |
 | `R` | Reset the simulation to its initial dam-break state and clear all barricades |
@@ -99,8 +101,10 @@ cargo run --release
 
 Movable debris (M7) spawns pre-placed in the dam-break's path as a small "urban flood" scene —
 trees and crates scattered where the collapsing column will reach them, and a row of houses
-further downstream (no keybind yet — see Project layout below for the planned extension to user
-placement). The flood visibly pushes trees/crates downstream via a real two-way fluid↔object
+further downstream. More can be dropped anywhere at runtime: pick a kind with `1`/`2`/`3` and
+middle-click to place it (`SphSim::place_debris` in `src/sim/mod.rs`, mirroring
+`place_barricade` — the user-placement extension point the original M7 design left open).
+The flood visibly pushes trees/crates downstream via a real two-way fluid↔object
 coupling (not just one-way collision like barricades): the fluid's exact reaction impulse is
 accumulated per-object on the GPU (fixed-point atomics, since WGSL has no `atomic<f32>`), read
 back once per frame, and integrated into each object's own velocity/position on the CPU.
@@ -151,9 +155,8 @@ src/
   camera.rs        — orbit camera + billboard camera uniform
   sim/             — SPH solver: particle buffers, compute pipelines (naive + grid), dam-break init
     barricade.rs   — user-placed static obstacles (one-way collision)
-    debris.rs      — movable debris (two-way fluid coupling); `place_barricade`'s shape is the
-                     template for later adding a user-placement path here, mirroring
-                     `place_barricade_at_cursor` in app.rs
+    debris.rs      — movable debris (two-way fluid coupling); user-placeable at runtime via
+                     `SphSim::place_debris` (mirrors `place_barricade`) and `1`/`2`/`3` + middle-click
   render/
     background.rs  — ground plane + boundary wall geometry (opaque pass)
     point_sprite.rs— M1 debug view: flat-shaded billboard spheres

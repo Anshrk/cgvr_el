@@ -49,6 +49,8 @@ struct Scene {
     /// cadence as the stats log, for the Flood Impact panel's time-series
     /// graph. Capped so a long-running demo doesn't grow this unbounded.
     destruction_history: VecDeque<(f32, u32, u32)>,
+    /// Which kind the next middle-click places — cycled with `1`/`2`/`3`.
+    selected_debris_kind: crate::sim::debris::DebrisKind,
 }
 
 const MAX_DESTRUCTION_HISTORY: usize = 600;
@@ -114,6 +116,7 @@ impl ApplicationHandler for App {
             settings_panel_rect: None,
             force_thresholds: crate::sim::debris::ForceThresholds::default(),
             destruction_history: VecDeque::new(),
+            selected_debris_kind: crate::sim::debris::DebrisKind::Crate,
         });
     }
 
@@ -165,6 +168,13 @@ impl ApplicationHandler for App {
                 ..
             } if !over_panel(scene, scene.cursor_pos) => {
                 place_barricade_at_cursor(scene);
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Middle,
+                ..
+            } if !over_panel(scene, scene.cursor_pos) => {
+                place_debris_at_cursor(scene);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // Always track the cursor position (needed for barricade
@@ -252,6 +262,18 @@ impl ApplicationHandler for App {
                         if s.as_str().eq_ignore_ascii_case("u") {
                             scene.show_settings = !scene.show_settings;
                         }
+                        if s.as_str() == "1" {
+                            scene.selected_debris_kind = crate::sim::debris::DebrisKind::Crate;
+                            eprintln!("[cgvr] middle-click now places: Crate");
+                        }
+                        if s.as_str() == "2" {
+                            scene.selected_debris_kind = crate::sim::debris::DebrisKind::Tree;
+                            eprintln!("[cgvr] middle-click now places: Tree");
+                        }
+                        if s.as_str() == "3" {
+                            scene.selected_debris_kind = crate::sim::debris::DebrisKind::House;
+                            eprintln!("[cgvr] middle-click now places: House");
+                        }
                     }
                 }
             }
@@ -287,6 +309,34 @@ fn place_barricade_at_cursor(scene: &mut Scene) {
     scene.sph.place_barricade(&scene.gpu.queue, center);
     scene.renderer.rebuild_barricades(&scene.gpu.device, scene.sph.barricades());
     eprintln!("[cgvr] barricade placed at ({:.2}, {:.2}, {:.2})", center[0], center[1], center[2]);
+}
+
+/// Middle-click placement of the currently-selected debris kind (`1`/`2`/`3`
+/// to pick Crate/Tree/House) — same ray-cast-onto-floor approach as
+/// `place_barricade_at_cursor`. `SphSim::place_debris` re-uploads
+/// immediately, and `update_debris` re-writes the render vertex buffer every
+/// frame regardless, so no extra rebuild call is needed here.
+fn place_debris_at_cursor(scene: &mut Scene) {
+    let (width, height) = (scene.gpu.config.width as f32, scene.gpu.config.height.max(1) as f32);
+    let ndc_x = (scene.cursor_pos.0 as f32 / width) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (scene.cursor_pos.1 as f32 / height) * 2.0;
+
+    let (origin, dir) = scene.camera.screen_ray(ndc_x, ndc_y);
+    let floor_y = scene.sph.params.domain_min[1];
+    if dir.y.abs() < 1.0e-6 {
+        return;
+    }
+    let t = (floor_y - origin.y) / dir.y;
+    if t <= 0.0 {
+        return;
+    }
+    let hit = origin + dir * t;
+
+    let kind = scene.selected_debris_kind;
+    let half_y = kind.half_extents()[1];
+    let center = [hit.x, floor_y + half_y, hit.z];
+    scene.sph.place_debris(&scene.gpu.queue, center, kind);
+    eprintln!("[cgvr] {:?} placed at ({:.2}, {:.2}, {:.2})", kind, center[0], center[1], center[2]);
 }
 
 /// Draws the settings panel: live profiling readouts, the keybind
@@ -466,6 +516,8 @@ fn draw_settings_panel(
                                 ("Left-drag", "Orbit camera"),
                                 ("Scroll", "Zoom"),
                                 ("Right-click", "Place barricade"),
+                                ("1 / 2 / 3", "Select Crate / Tree / House to place"),
+                                ("Middle-click", "Place selected debris kind"),
                                 ("G", "Toggle neighbor search (grid/naive)"),
                                 ("F", "Toggle render view (SSFR/debug)"),
                                 ("V", "Toggle vorticity heatmap"),
