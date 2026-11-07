@@ -353,9 +353,11 @@ fn draw_settings_panel(
             let window_response = egui::Window::new("CGVR Settings (U to hide)")
                 .anchor(egui::Align2::LEFT_TOP, [8.0, 8.0])
                 .default_width(260.0)
+                .max_height(window.inner_size().height as f32 / window.scale_factor() as f32 - 16.0)
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.set_max_width(260.0);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
 
                     egui::CollapsingHeader::new("Status").default_open(true).show(ui, |ui| {
                         ui.label(format!("FPS: {fps:.0} ({frame_ms:.2} ms/frame)"));
@@ -481,6 +483,7 @@ fn draw_settings_panel(
                                 ui.end_row();
                             }
                         });
+                    });
                     });
                 });
 
