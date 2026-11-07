@@ -78,7 +78,13 @@ impl OrbitController {
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         const SENSITIVITY: f32 = 0.005;
         self.yaw += dx * SENSITIVITY;
-        self.pitch = (self.pitch - dy * SENSITIVITY).clamp(-1.5, 1.5);
+        // Clamped just shy of true vertical (not all the way to +/- PI/2)
+        // to avoid the up-vector degenerating at the exact pole, not to
+        // impose a "ceiling" on how high you can look — 1.5 rad (~86 deg)
+        // was clearly too conservative (reported as "can't go higher than a
+        // specific height"); 1.55 rad (~88.8 deg) leaves effectively no
+        // practical limit while still avoiding the singularity.
+        self.pitch = (self.pitch - dy * SENSITIVITY).clamp(-1.55, 1.55);
     }
 
     pub fn zoom(&mut self, delta: f32) {

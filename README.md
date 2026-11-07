@@ -106,12 +106,24 @@ accumulated per-object on the GPU (fixed-point atomics, since WGSL has no `atomi
 back once per frame, and integrated into each object's own velocity/position on the CPU.
 Houses share the exact same coupling code but are heavy enough (`mass = 5000`) that the impulse
 barely moves them — they stay anchored while the flood flows around/through them, same as a real
-flooded house, while still participating in collision. The settings panel's **Flood Impact**
-section shows how many objects were swept away and the max displacement — a quantified version of
-the project's original "how does the flood affect its environment" framing. This per-frame
-readback is a real (measured) performance cost — expect noticeably lower FPS than without it; see
+flooded house, while still participating in collision. This per-frame readback is a real
+(measured) performance cost — expect noticeably lower FPS than without it; see
 `SphSim::update_debris_from_gpu` in `src/sim/mod.rs` for the non-blocking upgrade path if that
 becomes a problem.
+
+**Destruction vs. distance from the dam.** Every debris object tracks the hardest single-frame
+force it's ever taken (`peak_force`, derived from the same fluid→object reaction impulse used for
+movement — meaningful even for houses, which barely move) and its straight-line distance from the
+dam wall at spawn time. Each kind has its own damaged/destroyed force thresholds
+(`DebrisKind::force_thresholds` in `src/sim/debris.rs`), tuned empirically by logging real peak
+forces during a dam-break run — notably, force scales with an object's contact area, not its mass,
+so houses (bigger footprint) see forces in the same order of magnitude as a crate despite being
+immobile, and need a correspondingly higher threshold to register as destroyed rather than just
+damaged. The settings panel's **Flood Impact** section lists every object sorted nearest-to-dam
+first, with its distance, peak force, and status (Intact/Damaged/Destroyed) — this is meant to read
+as a gradient: objects closest to the dam take the hardest, earliest hits, while farther ones stay
+intact longer (or altogether, depending on how far downstream the flood reaches), directly
+answering the project's original framing of "how far does the damage reach."
 
 The app logs particle count, frame time, and basic physics sanity stats (min/max height, max
 speed, max density, NaN count) to stderr roughly once a second, plus densely for the first ~30

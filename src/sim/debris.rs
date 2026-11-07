@@ -41,7 +41,7 @@ const _: () = assert!(std::mem::size_of::<DebrisListParams>() == 16);
 /// mass (which controls how much the accumulated fluid impulse actually
 /// moves them: a house's mass is high enough that it's effectively static,
 /// while a tree is light enough to topple/get swept), and render color.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DebrisKind {
     Crate,
     Tree,
@@ -87,14 +87,57 @@ impl DebrisKind {
     }
 }
 
+/// How much damage a structure has taken. Houses barely move (by design —
+/// see `DebrisKind::mass`), so displacement alone can't measure destruction
+/// for them; `peak_force` (the hardest single-frame hit the object has ever
+/// taken, independent of whether it was heavy enough to actually move) is
+/// what makes a damage classification meaningful for anchored structures,
+/// not just swept ones.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DestructionStatus {
+    Intact,
+    Damaged,
+    Destroyed,
+}
+
+impl DebrisKind {
+    /// (damaged_at, destroyed_at) peak-force thresholds (newtons-ish — this
+    /// sim's force units, impulse/dt, not calibrated against real material
+    /// strengths). Tuned empirically by logging observed peak forces during
+    /// a real dam-break run: a tree at the front of the flood path (closest
+    /// to the dam) peaked around 2.5k N on first contact and crossed 6k N
+    /// within a couple seconds of sustained battering; crates (more contact
+    /// area than a tree, less than a house) needed closer to 9k N; houses —
+    /// despite being effectively immobile (`mass = 5000`) — still see
+    /// forces in the same order of magnitude as crates (force here comes
+    /// from contact area/particle pile-up, not mass), so they need a
+    /// noticeably higher threshold to actually register as "destroyed"
+    /// rather than just "damaged" within a typical demo run — reflecting
+    /// that they're built sturdier, not that they're physically harder to
+    /// hit.
+    pub fn force_thresholds(self) -> (f32, f32) {
+        match self {
+            DebrisKind::Tree => (1200.0, 6000.0),
+            DebrisKind::Crate => (2500.0, 9000.0),
+            DebrisKind::House => (8000.0, 20000.0),
+        }
+    }
+}
+
 /// CPU-side debris state: the GPU-visible `Debris` plus bookkeeping that
-/// never needs to be uploaded (spawn position for the flood-impact metric,
-/// and color for rendering — the GPU side only needs collision/physics data).
+/// never needs to be uploaded (spawn position/kind for the flood-impact
+/// metric, color for rendering — the GPU side only needs collision/physics
+/// data).
 #[derive(Clone, Copy)]
 pub struct DebrisState {
     pub gpu: Debris,
     pub spawn_position: [f32; 3],
     pub color: [f32; 3],
+    pub kind: DebrisKind,
+    /// Hardest single-frame force this object has experienced so far this
+    /// run (updated in `SphSim::update_debris_from_gpu`), independent of
+    /// how far it's actually moved — the basis for `destruction_status`.
+    pub peak_force: f32,
 }
 
 impl DebrisState {
@@ -110,6 +153,8 @@ impl DebrisState {
             },
             spawn_position: center,
             color: kind.color(),
+            kind,
+            peak_force: 0.0,
         }
     }
 
@@ -120,6 +165,27 @@ impl DebrisState {
             self.gpu.center[2] - self.spawn_position[2],
         ];
         (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    /// Straight-line distance from the dam wall (the domain's `-X` face,
+    /// where the collapsing water column starts) to this object's *spawn*
+    /// position — the "how far from the source" axis for the
+    /// destruction-vs-distance measurement. Fixed at spawn time (not
+    /// current position) so the measurement reflects where the structure
+    /// actually stood, not wherever the flood has since dragged it.
+    pub fn distance_from_dam(&self, domain_min: [f32; 3]) -> f32 {
+        self.spawn_position[0] - domain_min[0]
+    }
+
+    pub fn destruction_status(&self) -> DestructionStatus {
+        let (damaged_at, destroyed_at) = self.kind.force_thresholds();
+        if self.peak_force >= destroyed_at || self.displacement() > SWEPT_THRESHOLD * 3.0 {
+            DestructionStatus::Destroyed
+        } else if self.peak_force >= damaged_at || self.displacement() > SWEPT_THRESHOLD {
+            DestructionStatus::Damaged
+        } else {
+            DestructionStatus::Intact
+        }
     }
 }
 

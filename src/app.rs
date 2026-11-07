@@ -299,19 +299,26 @@ fn draw_settings_panel(
     let paused = scene.paused;
     let stats = scene.last_stats;
 
+    let domain_min = scene.sph.params.domain_min;
     let debris_total = scene.sph.debris().len();
-    let swept_count = scene
+    let destroyed_count = scene
         .sph
         .debris()
         .iter()
-        .filter(|d| d.displacement() > crate::sim::debris::SWEPT_THRESHOLD)
+        .filter(|d| d.destruction_status() == crate::sim::debris::DestructionStatus::Destroyed)
         .count();
-    let max_displacement = scene
+    let damaged_count = scene
         .sph
         .debris()
         .iter()
-        .map(|d| d.displacement())
-        .fold(0.0_f32, f32::max);
+        .filter(|d| d.destruction_status() == crate::sim::debris::DestructionStatus::Damaged)
+        .count();
+    // Sorted by distance from the dam so the panel reads as the
+    // destruction-vs-distance gradient it's measuring: nearest (hit first,
+    // hit hardest) objects at the top.
+    let mut debris_by_distance: Vec<_> = scene.sph.debris().iter().collect();
+    debris_by_distance
+        .sort_by(|a, b| a.distance_from_dam(domain_min).total_cmp(&b.distance_from_dam(domain_min)));
 
     let gpu = &scene.gpu;
     let ui_config = &mut scene.ui_config;
@@ -360,8 +367,30 @@ fn draw_settings_panel(
                     });
 
                     egui::CollapsingHeader::new("Flood Impact").default_open(true).show(ui, |ui| {
-                        ui.label(format!("Debris swept away: {swept_count} / {debris_total}"));
-                        ui.label(format!("Max displacement: {max_displacement:.2} m"));
+                        ui.label(format!(
+                            "Destroyed: {destroyed_count} / {debris_total}   Damaged: {damaged_count} / {debris_total}"
+                        ));
+                        ui.label("Destruction vs. distance from the dam:");
+                        egui::Grid::new("flood-impact-grid").striped(true).show(ui, |ui| {
+                            ui.label("Kind");
+                            ui.label("Dist (m)");
+                            ui.label("Peak force");
+                            ui.label("Status");
+                            ui.end_row();
+                            for d in &debris_by_distance {
+                                let status = d.destruction_status();
+                                let status_label = match status {
+                                    crate::sim::debris::DestructionStatus::Intact => "Intact",
+                                    crate::sim::debris::DestructionStatus::Damaged => "Damaged",
+                                    crate::sim::debris::DestructionStatus::Destroyed => "Destroyed",
+                                };
+                                ui.label(format!("{:?}", d.kind));
+                                ui.label(format!("{:.1}", d.distance_from_dam(domain_min)));
+                                ui.label(format!("{:.0}", d.peak_force));
+                                ui.label(status_label);
+                                ui.end_row();
+                            }
+                        });
                     });
 
                     egui::CollapsingHeader::new("Dam-break config").default_open(true).show(ui, |ui| {
@@ -499,13 +528,16 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
         );
         scene.last_stats = stats;
 
-        let max_disp = scene.sph.debris().iter().map(|d| d.displacement()).fold(0.0_f32, f32::max);
-        let positions: Vec<String> = scene
-            .sph
-            .debris()
-            .iter()
-            .map(|d| format!("({:.2},{:.2},{:.2})", d.gpu.center[0], d.gpu.center[1], d.gpu.center[2]))
-            .collect();
-        eprintln!("[cgvr] debris max_displacement={max_disp:.3} positions={positions:?}");
+        let domain_min = scene.sph.params.domain_min;
+        for d in scene.sph.debris() {
+            eprintln!(
+                "[cgvr] debris kind={:?} dist_from_dam={:.2} disp={:.3} peak_force={:.1} status={:?}",
+                d.kind,
+                d.distance_from_dam(domain_min),
+                d.displacement(),
+                d.peak_force,
+                d.destruction_status(),
+            );
+        }
     }
 }

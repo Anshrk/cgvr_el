@@ -789,6 +789,15 @@ impl SphSim {
                     accum[i * 3 + 1] as f32 / debris::FORCE_FIXED_POINT_SCALE,
                     accum[i * 3 + 2] as f32 / debris::FORCE_FIXED_POINT_SCALE,
                 ];
+                // Peak force this object has ever experienced (independent
+                // of its mass/how much it actually moved) — the basis for
+                // DebrisState::destruction_status. Force = impulse / time;
+                // dt_total is the simulated time this frame's impulse was
+                // accumulated over.
+                let impulse_mag = (impulse[0] * impulse[0] + impulse[1] * impulse[1] + impulse[2] * impulse[2]).sqrt();
+                let force_this_frame = impulse_mag / dt_total.max(1.0e-6);
+                d.peak_force = d.peak_force.max(force_this_frame);
+
                 let mass = d.gpu.mass;
                 for axis in 0..3 {
                     d.gpu.velocity[axis] += impulse[axis] / mass + gravity[axis] * dt_total;
