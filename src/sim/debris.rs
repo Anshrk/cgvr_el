@@ -187,6 +187,26 @@ impl DebrisState {
             DestructionStatus::Intact
         }
     }
+
+    /// The color to actually render this object as — `color` tinted toward
+    /// char/soot as it takes damage, so destruction is visible in the scene
+    /// itself and not just the settings-panel table.
+    pub fn display_color(&self) -> [f32; 3] {
+        const DAMAGED_TINT: [f32; 3] = [0.12, 0.08, 0.06];
+        const DESTROYED_TINT: [f32; 3] = [0.05, 0.04, 0.04];
+        let mix = |a: [f32; 3], b: [f32; 3], t: f32| {
+            [
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ]
+        };
+        match self.destruction_status() {
+            DestructionStatus::Intact => self.color,
+            DestructionStatus::Damaged => mix(self.color, DAMAGED_TINT, 0.5),
+            DestructionStatus::Destroyed => mix(self.color, DESTROYED_TINT, 0.85),
+        }
+    }
 }
 
 /// Fixed scripted spawn layout for v1 (pre-placed, not user-triggered — see
