@@ -79,6 +79,10 @@ impl Renderer {
         self.background.update_debris(queue, debris, thresholds);
     }
 
+    pub fn update_damage_ring(&mut self, queue: &wgpu::Queue, center: [f32; 3], radius: f32) {
+        self.background.update_damage_ring(queue, center, radius);
+    }
+
     pub fn toggle_vorticity_heatmap(&mut self) {
         self.ssfr.toggle_vorticity_heatmap();
     }

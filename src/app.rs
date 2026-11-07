@@ -550,6 +550,20 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
     }
     scene.renderer.update_debris(&scene.gpu.queue, scene.sph.debris(), &scene.force_thresholds);
 
+    {
+        let domain_min = scene.sph.params.domain_min;
+        let domain_max = scene.sph.params.domain_max;
+        let destruction_radius = scene
+            .sph
+            .debris()
+            .iter()
+            .filter(|d| d.destruction_status(&scene.force_thresholds) == crate::sim::debris::DestructionStatus::Destroyed)
+            .map(|d| d.distance_from_dam(domain_min))
+            .fold(0.0_f32, f32::max);
+        let ring_center = [domain_min[0], domain_min[1] + 0.01, (domain_min[2] + domain_max[2]) * 0.5];
+        scene.renderer.update_damage_ring(&scene.gpu.queue, ring_center, destruction_radius);
+    }
+
     if rebuild_requested == Some(true) {
         scene.sph = SphSim::new(&scene.gpu.device, scene.ui_config);
         scene.renderer.rebuild_barricades(&scene.gpu.device, &[]);

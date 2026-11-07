@@ -100,6 +100,47 @@ fn box_quads(center: [f32; 3], half: [f32; 3], color: [f32; 3]) -> Vec<Backgroun
 const BARRICADE_COLOR: [f32; 3] = [0.75, 0.35, 0.2];
 const DEBRIS_VERTS_PER_OBJECT: usize = 36;
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RingVertex {
+    position: [f32; 3],
+    color: [f32; 4],
+}
+
+const RING_SEGMENTS: usize = 64;
+const RING_VERTS: usize = RING_SEGMENTS * 6;
+const RING_THICKNESS: f32 = 0.3;
+
+/// Builds a translucent annulus (ring) in the XZ plane, centered at `center`,
+/// growing from the dam outward to `radius`. Six vertices (2 triangles) per
+/// segment, between `radius - RING_THICKNESS` and `radius` — a boundary
+/// marker rather than a filled disc, so it reads as "destruction has reached
+/// this far" rather than an area fill.
+fn ring_quads(center: [f32; 3], radius: f32, color: [f32; 4]) -> Vec<RingVertex> {
+    if radius <= 0.0 {
+        return Vec::new();
+    }
+    let inner = (radius - RING_THICKNESS).max(0.0);
+    let mut vertices = Vec::with_capacity(RING_VERTS);
+    for i in 0..RING_SEGMENTS {
+        let t0 = (i as f32 / RING_SEGMENTS as f32) * std::f32::consts::TAU;
+        let t1 = ((i + 1) as f32 / RING_SEGMENTS as f32) * std::f32::consts::TAU;
+        let (s0, c0) = t0.sin_cos();
+        let (s1, c1) = t1.sin_cos();
+        let outer0 = [center[0] + c0 * radius, center[1], center[2] + s0 * radius];
+        let outer1 = [center[0] + c1 * radius, center[1], center[2] + s1 * radius];
+        let inner0 = [center[0] + c0 * inner, center[1], center[2] + s0 * inner];
+        let inner1 = [center[0] + c1 * inner, center[1], center[2] + s1 * inner];
+        vertices.push(RingVertex { position: inner0, color });
+        vertices.push(RingVertex { position: outer0, color });
+        vertices.push(RingVertex { position: outer1, color });
+        vertices.push(RingVertex { position: inner0, color });
+        vertices.push(RingVertex { position: outer1, color });
+        vertices.push(RingVertex { position: inner1, color });
+    }
+    vertices
+}
+
 pub struct BackgroundPipeline {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
@@ -113,6 +154,11 @@ pub struct BackgroundPipeline {
     // `queue.write_buffer` each frame instead of reallocated.
     debris_vertex_buffer: wgpu::Buffer,
     debris_vertex_count: u32,
+    // Translucent destruction-radius ring — the only alpha-blended geometry
+    // in the scene, hence its own pipeline (see damage_ring.wgsl).
+    ring_pipeline: wgpu::RenderPipeline,
+    ring_vertex_buffer: wgpu::Buffer,
+    ring_vertex_count: u32,
 }
 
 impl BackgroundPipeline {
@@ -205,6 +251,73 @@ impl BackgroundPipeline {
             cache: None,
         });
 
+        let ring_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("damage-ring"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/damage_ring.wgsl").into()),
+        });
+
+        let ring_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<RingVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        };
+
+        // Same bind group layout/pipeline layout as the opaque pipeline
+        // (single vertex-stage camera uniform) — reused as-is. Only the
+        // blend state, vertex layout, and depth-write behavior differ: this
+        // is translucent, and must not write depth (it shouldn't occlude
+        // the fluid rendered after it, just sit visually on the floor).
+        let ring_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("damage-ring-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &ring_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(ring_vertex_layout)],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ring_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("background-camera-uniform"),
             contents: bytemuck::bytes_of(&CameraUniform {
@@ -245,6 +358,13 @@ impl BackgroundPipeline {
             mapped_at_creation: false,
         });
 
+        let ring_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("damage-ring-vertices"),
+            size: (RING_VERTS * std::mem::size_of::<RingVertex>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline,
             camera_buffer,
@@ -255,6 +375,9 @@ impl BackgroundPipeline {
             barricade_vertex_count: 0,
             debris_vertex_buffer,
             debris_vertex_count: 0,
+            ring_pipeline,
+            ring_vertex_buffer,
+            ring_vertex_count: 0,
         }
     }
 
@@ -299,6 +422,19 @@ impl BackgroundPipeline {
         }
     }
 
+    /// Re-generates the destruction-radius ring around `center` (the dam
+    /// wall's midpoint) out to `radius`. `radius <= 0.0` (nothing destroyed
+    /// yet) clears it. Cheap — CPU-side trig for `RING_SEGMENTS` segments,
+    /// same per-frame `write_buffer` pattern as `update_debris`.
+    pub fn update_damage_ring(&mut self, queue: &wgpu::Queue, center: [f32; 3], radius: f32) {
+        const RING_COLOR: [f32; 4] = [0.9, 0.15, 0.1, 0.35];
+        let vertices = ring_quads(center, radius, RING_COLOR);
+        self.ring_vertex_count = vertices.len() as u32;
+        if !vertices.is_empty() {
+            queue.write_buffer(&self.ring_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        }
+    }
+
     pub fn draw<'pass>(&'pass self, render_pass: &mut wgpu::RenderPass<'pass>) {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
@@ -313,6 +449,15 @@ impl BackgroundPipeline {
         if self.debris_vertex_count > 0 {
             render_pass.set_vertex_buffer(0, self.debris_vertex_buffer.slice(..));
             render_pass.draw(0..self.debris_vertex_count, 0..1);
+        }
+
+        // Translucent — drawn last so it blends over the already-drawn
+        // opaque ground/barricades/debris.
+        if self.ring_vertex_count > 0 {
+            render_pass.set_pipeline(&self.ring_pipeline);
+            render_pass.set_bind_group(0, &self.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.ring_vertex_buffer.slice(..));
+            render_pass.draw(0..self.ring_vertex_count, 0..1);
         }
     }
 }
