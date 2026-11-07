@@ -96,6 +96,7 @@ impl Renderer {
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
+        surface_texture: &wgpu::Texture,
         sph: &SphSim,
         camera: &Camera,
     ) {
@@ -129,6 +130,7 @@ impl Renderer {
         }
 
         if self.ssfr_enabled {
+            self.ssfr.grab_background(encoder, surface_texture);
             self.ssfr.render(
                 &gpu.device,
                 &gpu.queue,

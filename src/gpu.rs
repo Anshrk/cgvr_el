@@ -65,7 +65,10 @@ impl GpuContext {
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // COPY_SRC: the SSFR Fresnel/refraction pass grabs the opaque
+            // background into a sampled texture before shading overwrites
+            // it (see SsfrPipeline's background_grab_tex).
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.0,

@@ -41,10 +41,16 @@ struct Targets {
     normal_view: wgpu::TextureView,
     vorticity_tex: wgpu::Texture,
     vorticity_view: wgpu::TextureView,
+    // A copy of the opaque background (ground/barricades/debris/damage
+    // ring), grabbed right before the shading pass overwrites those pixels
+    // with the fluid's color — the refraction source for ssfr_shade.wgsl.
+    // Same format as the swapchain (copy_texture_to_texture requires it).
+    background_grab_tex: wgpu::Texture,
+    background_grab_view: wgpu::TextureView,
 }
 
-fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
-    let make = |label: &str, format: wgpu::TextureFormat| {
+fn create_targets(device: &wgpu::Device, color_format: wgpu::TextureFormat, width: u32, height: u32) -> Targets {
+    let make = |label: &str, format: wgpu::TextureFormat, extra_usage: wgpu::TextureUsages| {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
@@ -52,17 +58,19 @@ fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | extra_usage,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         (texture, view)
     };
 
-    let (depth_tex, depth_view) = make("ssfr-depth", DEPTH_TARGET_FORMAT);
-    let (blur_tmp_tex, blur_tmp_view) = make("ssfr-blur-tmp", DEPTH_TARGET_FORMAT);
-    let (normal_tex, normal_view) = make("ssfr-normal", NORMAL_TARGET_FORMAT);
-    let (vorticity_tex, vorticity_view) = make("ssfr-vorticity", VORTICITY_TARGET_FORMAT);
+    let (depth_tex, depth_view) = make("ssfr-depth", DEPTH_TARGET_FORMAT, wgpu::TextureUsages::empty());
+    let (blur_tmp_tex, blur_tmp_view) = make("ssfr-blur-tmp", DEPTH_TARGET_FORMAT, wgpu::TextureUsages::empty());
+    let (normal_tex, normal_view) = make("ssfr-normal", NORMAL_TARGET_FORMAT, wgpu::TextureUsages::empty());
+    let (vorticity_tex, vorticity_view) = make("ssfr-vorticity", VORTICITY_TARGET_FORMAT, wgpu::TextureUsages::empty());
+    let (background_grab_tex, background_grab_view) =
+        make("ssfr-background-grab", color_format, wgpu::TextureUsages::COPY_DST);
 
     Targets {
         depth_tex,
@@ -73,6 +81,8 @@ fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> Targets {
         normal_view,
         vorticity_tex,
         vorticity_view,
+        background_grab_tex,
+        background_grab_view,
     }
 }
 
@@ -92,6 +102,7 @@ pub struct SsfrPipeline {
     gbuffer_params: wgpu::Buffer,
     targets: Targets,
     show_vorticity: bool,
+    color_format: wgpu::TextureFormat,
 }
 
 impl SsfrPipeline {
@@ -121,7 +132,7 @@ impl SsfrPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let targets = create_targets(device, width, height);
+        let targets = create_targets(device, color_format, width, height);
 
         Self {
             depth_splat,
@@ -131,11 +142,28 @@ impl SsfrPipeline {
             gbuffer_params,
             targets,
             show_vorticity: false,
+            color_format,
         }
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.targets = create_targets(device, width, height);
+        self.targets = create_targets(device, self.color_format, width, height);
+    }
+
+    /// Copies the already-drawn opaque background into `background_grab_tex`
+    /// before the shading pass overwrites those pixels with the fluid's
+    /// color — the refraction source for `ssfr_shade.wgsl`. Must run after
+    /// the background pass and before `render`. No-op if the sizes don't
+    /// match (e.g. a resize landed between passes this frame).
+    pub fn grab_background(&self, encoder: &mut wgpu::CommandEncoder, swapchain_texture: &wgpu::Texture) {
+        if swapchain_texture.size() != self.targets.background_grab_tex.size() {
+            return;
+        }
+        encoder.copy_texture_to_texture(
+            swapchain_texture.as_image_copy(),
+            self.targets.background_grab_tex.as_image_copy(),
+            self.targets.background_grab_tex.size(),
+        );
     }
 
     pub fn toggle_vorticity_heatmap(&mut self) {
@@ -273,6 +301,7 @@ impl SsfrPipeline {
             &self.targets.depth_view,
             &self.targets.normal_view,
             &self.targets.vorticity_view,
+            &self.targets.background_grab_view,
         );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

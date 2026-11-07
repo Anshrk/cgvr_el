@@ -580,9 +580,14 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
     if !scene.paused {
         scene.sph.step(&scene.gpu.queue, &mut encoder);
     }
-    scene
-        .renderer
-        .render_frame(&scene.gpu, &mut encoder, &color_view, &scene.sph, &scene.camera);
+    scene.renderer.render_frame(
+        &scene.gpu,
+        &mut encoder,
+        &color_view,
+        &surface_texture.texture,
+        &scene.sph,
+        &scene.camera,
+    );
 
     let rebuild_requested = if scene.show_settings {
         Some(draw_settings_panel(scene, window, &color_view, &mut encoder))

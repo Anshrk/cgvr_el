@@ -1,10 +1,11 @@
 // M3 SSFR stage 4/4: combine the smoothed depth + reconstructed normal into
 // the final shaded water color, composited over whatever the background
 // pass already drew (this pass discards wherever there's no fluid, so the
-// background shows through unmodified at those pixels). Fresnel/refraction
-// against the real background color is M6 polish; this is the simpler
-// Lambertian + rim-light version that already reads as water once the
-// bilateral blur + real reconstructed normals are in place.
+// background shows through unmodified at those pixels). Fresnel/refraction:
+// `background_grab_tex` is a copy of the opaque background taken right
+// before this pass runs (see `SsfrPipeline::grab_background`), sampled at a
+// normal-distorted UV for refraction; a cheap analytic sky gradient stands
+// in for a reflection source (no real environment map in this scene).
 
 struct GBufferParams {
     tan_half_fov_y: f32,
@@ -20,6 +21,24 @@ struct GBufferParams {
 @group(0) @binding(1) var depth_tex: texture_2d<f32>;
 @group(0) @binding(2) var normal_tex: texture_2d<f32>;
 @group(0) @binding(3) var vorticity_tex: texture_2d<f32>;
+@group(0) @binding(4) var background_grab_tex: texture_2d<f32>;
+@group(0) @binding(5) var background_sampler: sampler;
+
+// How strongly the surface normal bends the refraction UV — tuned
+// empirically, same as every other constant in this project; too high
+// smears the background into an unrecognizable blur, too low looks flat.
+const REFRACTION_STRENGTH: f32 = 0.025;
+
+// Cheap stand-in for a real environment/reflection map: a vertical gradient
+// from a horizon tone up to a brighter "sky" tone, keyed by the normal's
+// world-space-ish up component (view-space Y, since normal_tex stores
+// view-space normals — close enough for a glint, not meant to be physical).
+fn sky_color(normal: vec3<f32>) -> vec3<f32> {
+    let horizon = vec3<f32>(0.5, 0.65, 0.75);
+    let zenith = vec3<f32>(0.85, 0.95, 1.0);
+    let up = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    return mix(horizon, zenith, up);
+}
 
 // Simple blue -> cyan -> yellow -> red heatmap ramp.
 fn heatmap(t_in: f32) -> vec3<f32> {
@@ -64,8 +83,18 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let shallow_water = vec3<f32>(0.25, 0.6, 0.85);
     let base_color = mix(deep_water, shallow_water, diffuse);
 
-    let rim_color = vec3<f32>(0.75, 0.9, 1.0);
-    var color = mix(base_color, rim_color, fresnel * 0.6) * (0.35 + 0.65 * diffuse);
+    // Refraction: a distorted glimpse of whatever's behind the fluid
+    // (ground/debris/damage ring), tinted with the water's own color so it
+    // still reads as colored water rather than a clear window.
+    let uv = frag_pos.xy / params.resolution;
+    let refract_uv = clamp(uv + normal.xy * REFRACTION_STRENGTH, vec2<f32>(0.001), vec2<f32>(0.999));
+    let refraction_color = textureSampleLevel(background_grab_tex, background_sampler, refract_uv, 0.0).rgb;
+    let tinted_refraction = mix(refraction_color, base_color, 0.55);
+
+    // Reflection: no real environment map, so an analytic sky gradient
+    // stands in, blended in more strongly at grazing angles (fresnel).
+    let reflection_color = sky_color(normal);
+    var color = mix(tinted_refraction, reflection_color, fresnel * 0.6) * (0.35 + 0.65 * diffuse);
 
     if (params.show_vorticity > 0.5) {
         let vorticity = textureLoad(vorticity_tex, coord, 0).r;
