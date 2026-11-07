@@ -99,7 +99,7 @@ cargo run --release
 | Scroll wheel | Zoom in/out |
 | Right-click | Place a barricade (ray-cast onto the floor at the cursor) — up to 8 at once, oldest replaced |
 | `1` / `2` / `3` | Select Crate / Tree / House as the next debris kind to place |
-| Middle-click | Place the selected debris kind (ray-cast onto the floor) — up to 16 at once, oldest replaced |
+| Middle-click / `E` | Place the selected debris kind (ray-cast onto the floor) — up to 16 at once, oldest replaced. Use `E` if your input device has no middle-click (e.g. a trackpad) |
 | `G` | Toggle neighbor-search strategy (grid-accelerated vs. naive O(n²)) — watch the FPS change |
 | `F` | Toggle rendering mode: M1 point-sprite debug view vs. M3 screen-space fluid rendering (SSFR) |
 | `R` | Reset the simulation to its initial dam-break state and clear all barricades |
@@ -115,8 +115,9 @@ cargo run --release
 Movable debris (M7) spawns pre-placed in the dam-break's path as a small "urban flood" scene —
 trees and crates scattered where the collapsing column will reach them, and a row of houses
 further downstream. More can be dropped anywhere at runtime: pick a kind with `1`/`2`/`3` and
-middle-click to place it (`SphSim::place_debris` in `src/sim/mod.rs`, mirroring
-`place_barricade` — the user-placement extension point the original M7 design left open).
+middle-click (or `E`, if you're on a trackpad with no middle-click) to place it
+(`SphSim::place_debris` in `src/sim/mod.rs`, mirroring `place_barricade` — the user-placement
+extension point the original M7 design left open).
 The flood visibly pushes trees/crates downstream via a real two-way fluid↔object
 coupling (not just one-way collision like barricades): the fluid's exact reaction impulse is
 accumulated per-object on the GPU (fixed-point atomics, since WGSL has no `atomic<f32>`), read

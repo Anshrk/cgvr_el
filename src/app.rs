@@ -264,15 +264,22 @@ impl ApplicationHandler for App {
                         }
                         if s.as_str() == "1" {
                             scene.selected_debris_kind = crate::sim::debris::DebrisKind::Crate;
-                            eprintln!("[cgvr] middle-click now places: Crate");
+                            eprintln!("[cgvr] selected debris kind: Crate (middle-click or E to place)");
                         }
                         if s.as_str() == "2" {
                             scene.selected_debris_kind = crate::sim::debris::DebrisKind::Tree;
-                            eprintln!("[cgvr] middle-click now places: Tree");
+                            eprintln!("[cgvr] selected debris kind: Tree (middle-click or E to place)");
                         }
                         if s.as_str() == "3" {
                             scene.selected_debris_kind = crate::sim::debris::DebrisKind::House;
-                            eprintln!("[cgvr] middle-click now places: House");
+                            eprintln!("[cgvr] selected debris kind: House (middle-click or E to place)");
+                        }
+                        // Keyboard alternative to middle-click: most trackpads have no
+                        // middle-click gesture at all, so this is the only way to place
+                        // debris for anyone not using a physical mouse. Places at the
+                        // current cursor position exactly like middle-click does.
+                        if s.as_str().eq_ignore_ascii_case("e") && !over_panel(scene, scene.cursor_pos) {
+                            place_debris_at_cursor(scene);
                         }
                         if s.as_str().eq_ignore_ascii_case("b") {
                             run_benchmark(scene);
@@ -599,7 +606,7 @@ fn draw_settings_panel(
                                 ("Scroll", "Zoom"),
                                 ("Right-click", "Place barricade"),
                                 ("1 / 2 / 3", "Select Crate / Tree / House to place"),
-                                ("Middle-click", "Place selected debris kind"),
+                                ("Middle-click / E", "Place selected debris kind (E if no middle-click, e.g. trackpad)"),
                                 ("G", "Toggle neighbor search (grid/naive)"),
                                 ("F", "Toggle render view (SSFR/debug)"),
                                 ("V", "Toggle vorticity heatmap"),
