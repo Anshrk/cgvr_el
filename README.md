@@ -38,7 +38,7 @@ scope — lives in this repo's development history / project plan and is summari
 | M3 | Screen-space fluid rendering (depth splat → bilateral blur → reconstructed normals → shading) + background/ground plane | ✅ Done — confirmed looking better than the debug view |
 | M5 | Barricade placement (mouse-ray) + collision | ✅ Done |
 | M6 | Vorticity heatmap ✅, dynamic CFL timestep ✅, on-screen settings/profiling panel ✅ done; Fresnel/refraction shading polish still planned | 🚧 In progress |
-| M7 | Movable debris: two-way fluid↔object coupling (GPU atomic force accumulation → CPU rigid-body integration), pre-placed "urban clutter" the flood visibly pushes/carries, flood-impact metric | ✅ Done — confirmed live: debris slides across the whole domain and gets lifted/tumbled as the flood passes |
+| M7 | Movable debris: two-way fluid↔object coupling (GPU atomic force accumulation → CPU rigid-body integration), pre-placed small "urban flood scene" (trees, crates, houses) the flood visibly pushes/carries, flood-impact metric | ✅ Done — confirmed live: trees/crates get swept meters downstream while heavy houses stay anchored, water flowing around them |
 | ~~M4~~ | ~~Desktop stereo camera (VR-sim)~~ | ❌ Dropped — out of scope (see Context) |
 
 **Validated so far:** the SPH solver is physically stable (dam-break column collapses, hits the
@@ -97,15 +97,19 @@ cargo run --release
 | `V` | Toggle the vorticity heatmap overlay (SSFR view only — press `F` first) |
 | `D` | Toggle dynamic CFL timestep vs. fixed dt — watch `dt` in the log shrink during a fast splash |
 
-Movable debris (M7) spawn pre-placed in the dam-break's path (no keybind yet — see Project
-layout below for the planned extension to user placement). The flood visibly pushes them
-downstream via a real two-way fluid↔object coupling (not just one-way collision like
-barricades): the fluid's exact reaction impulse is accumulated per-object on the GPU
-(fixed-point atomics, since WGSL has no `atomic<f32>`), read back once per frame, and integrated
-into each object's own velocity/position on the CPU. The settings panel's **Flood Impact**
-section shows how many were swept away and the max displacement — a quantified version of the
-project's original "how does the flood affect its environment" framing. This per-frame readback
-is a real (measured) performance cost — expect noticeably lower FPS than without it; see
+Movable debris (M7) spawns pre-placed in the dam-break's path as a small "urban flood" scene —
+trees and crates scattered where the collapsing column will reach them, and a row of houses
+further downstream (no keybind yet — see Project layout below for the planned extension to user
+placement). The flood visibly pushes trees/crates downstream via a real two-way fluid↔object
+coupling (not just one-way collision like barricades): the fluid's exact reaction impulse is
+accumulated per-object on the GPU (fixed-point atomics, since WGSL has no `atomic<f32>`), read
+back once per frame, and integrated into each object's own velocity/position on the CPU.
+Houses share the exact same coupling code but are heavy enough (`mass = 5000`) that the impulse
+barely moves them — they stay anchored while the flood flows around/through them, same as a real
+flooded house, while still participating in collision. The settings panel's **Flood Impact**
+section shows how many objects were swept away and the max displacement — a quantified version of
+the project's original "how does the flood affect its environment" framing. This per-frame
+readback is a real (measured) performance cost — expect noticeably lower FPS than without it; see
 `SphSim::update_debris_from_gpu` in `src/sim/mod.rs` for the non-blocking upgrade path if that
 becomes a problem.
 

@@ -98,7 +98,6 @@ fn box_quads(center: [f32; 3], half: [f32; 3], color: [f32; 3]) -> Vec<Backgroun
 }
 
 const BARRICADE_COLOR: [f32; 3] = [0.75, 0.35, 0.2];
-const DEBRIS_COLOR: [f32; 3] = [0.55, 0.45, 0.3];
 const DEBRIS_VERTS_PER_OBJECT: usize = 36;
 
 pub struct BackgroundPipeline {
@@ -287,7 +286,7 @@ impl BackgroundPipeline {
     pub fn update_debris(&mut self, queue: &wgpu::Queue, debris: &[DebrisState]) {
         let mut vertices = Vec::with_capacity(debris.len() * DEBRIS_VERTS_PER_OBJECT);
         for d in debris {
-            vertices.extend(box_quads(d.gpu.center, d.gpu.half_extents, DEBRIS_COLOR));
+            vertices.extend(box_quads(d.gpu.center, d.gpu.half_extents, d.color));
         }
         self.debris_vertex_count = vertices.len() as u32;
         if !vertices.is_empty() {

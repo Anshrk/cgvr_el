@@ -155,10 +155,16 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // Always track the cursor position (needed for barricade
-                // placement), but only drive camera orbit when the cursor
-                // isn't over the settings panel.
+                // placement). `scene.dragging` already means the drag
+                // *started* outside the panel (gated on the MouseInput
+                // press above) — once dragging, keep applying orbit even if
+                // the cursor wanders over the panel's rect mid-drag (e.g.
+                // dragging upward naturally crosses into the top-left
+                // corner where the panel lives); re-checking over_panel
+                // here would silently cancel the drag at that point,
+                // capping how far up you could look.
                 scene.cursor_pos = (position.x, position.y);
-                if scene.dragging && !over_panel(scene, scene.cursor_pos) {
+                if scene.dragging {
                     if let Some((lx, ly)) = scene.last_cursor {
                         let dx = (position.x - lx) as f32;
                         let dy = (position.y - ly) as f32;
