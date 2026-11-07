@@ -40,6 +40,10 @@ struct Scene {
     /// there's no central panel / root-level UI (we only use a floating
     /// `egui::Window`), which is exactly our case.
     settings_panel_rect: Option<egui::Rect>,
+    /// Live-editable per-kind destruction thresholds, defaulted from
+    /// `DebrisKind::force_thresholds` — see the "Flood Impact" settings
+    /// panel section.
+    force_thresholds: crate::sim::debris::ForceThresholds,
 }
 
 #[derive(Default)]
@@ -101,6 +105,7 @@ impl ApplicationHandler for App {
             ui_config,
             show_settings: true,
             settings_panel_rect: None,
+            force_thresholds: crate::sim::debris::ForceThresholds::default(),
         });
     }
 
@@ -305,13 +310,13 @@ fn draw_settings_panel(
         .sph
         .debris()
         .iter()
-        .filter(|d| d.destruction_status() == crate::sim::debris::DestructionStatus::Destroyed)
+        .filter(|d| d.destruction_status(&scene.force_thresholds) == crate::sim::debris::DestructionStatus::Destroyed)
         .count();
     let damaged_count = scene
         .sph
         .debris()
         .iter()
-        .filter(|d| d.destruction_status() == crate::sim::debris::DestructionStatus::Damaged)
+        .filter(|d| d.destruction_status(&scene.force_thresholds) == crate::sim::debris::DestructionStatus::Damaged)
         .count();
     // Sorted by distance from the dam so the panel reads as the
     // destruction-vs-distance gradient it's measuring: nearest (hit first,
@@ -322,6 +327,7 @@ fn draw_settings_panel(
 
     let gpu = &scene.gpu;
     let ui_config = &mut scene.ui_config;
+    let force_thresholds = &mut scene.force_thresholds;
     let mut rebuild = false;
     let mut panel_rect = None;
 
@@ -378,7 +384,7 @@ fn draw_settings_panel(
                             ui.label("Status");
                             ui.end_row();
                             for d in &debris_by_distance {
-                                let status = d.destruction_status();
+                                let status = d.destruction_status(force_thresholds);
                                 let status_label = match status {
                                     crate::sim::debris::DestructionStatus::Intact => "Intact",
                                     crate::sim::debris::DestructionStatus::Damaged => "Damaged",
@@ -391,6 +397,20 @@ fn draw_settings_panel(
                                 ui.end_row();
                             }
                         });
+
+                        ui.add_space(4.0);
+                        ui.label("Destruction thresholds (damaged / destroyed force):");
+                        for (label, pair) in [
+                            ("Tree", &mut force_thresholds.tree),
+                            ("Crate", &mut force_thresholds.crate_),
+                            ("House", &mut force_thresholds.house),
+                        ] {
+                            ui.horizontal(|ui| {
+                                ui.label(label);
+                                ui.add(egui::DragValue::new(&mut pair.0).speed(50.0).range(0.0..=pair.1));
+                                ui.add(egui::DragValue::new(&mut pair.1).speed(50.0).range(pair.0..=100000.0));
+                            });
+                        }
                     });
 
                     egui::CollapsingHeader::new("Dam-break config").default_open(true).show(ui, |ui| {
@@ -490,7 +510,7 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
     if !scene.paused {
         scene.sph.update_debris_from_gpu(&scene.gpu.device, &scene.gpu.queue);
     }
-    scene.renderer.update_debris(&scene.gpu.queue, scene.sph.debris());
+    scene.renderer.update_debris(&scene.gpu.queue, scene.sph.debris(), &scene.force_thresholds);
 
     if rebuild_requested == Some(true) {
         scene.sph = SphSim::new(&scene.gpu.device, scene.ui_config);
@@ -536,7 +556,7 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
                 d.distance_from_dam(domain_min),
                 d.displacement(),
                 d.peak_force,
-                d.destruction_status(),
+                d.destruction_status(&scene.force_thresholds),
             );
         }
     }

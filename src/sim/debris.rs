@@ -124,6 +124,38 @@ impl DebrisKind {
     }
 }
 
+/// Live-editable copy of each kind's (damaged_at, destroyed_at) thresholds,
+/// seeded from `DebrisKind::force_thresholds`'s defaults. Kept outside
+/// `DebrisKind` (which stays a pure, copy-able descriptor) so the settings
+/// panel can retune destruction sensitivity at runtime — e.g. during a demo
+/// Q&A — without recompiling.
+#[derive(Clone, Copy)]
+pub struct ForceThresholds {
+    pub tree: (f32, f32),
+    pub crate_: (f32, f32),
+    pub house: (f32, f32),
+}
+
+impl Default for ForceThresholds {
+    fn default() -> Self {
+        Self {
+            tree: DebrisKind::Tree.force_thresholds(),
+            crate_: DebrisKind::Crate.force_thresholds(),
+            house: DebrisKind::House.force_thresholds(),
+        }
+    }
+}
+
+impl ForceThresholds {
+    pub fn get(&self, kind: DebrisKind) -> (f32, f32) {
+        match kind {
+            DebrisKind::Tree => self.tree,
+            DebrisKind::Crate => self.crate_,
+            DebrisKind::House => self.house,
+        }
+    }
+}
+
 /// CPU-side debris state: the GPU-visible `Debris` plus bookkeeping that
 /// never needs to be uploaded (spawn position/kind for the flood-impact
 /// metric, color for rendering — the GPU side only needs collision/physics
@@ -177,8 +209,8 @@ impl DebrisState {
         self.spawn_position[0] - domain_min[0]
     }
 
-    pub fn destruction_status(&self) -> DestructionStatus {
-        let (damaged_at, destroyed_at) = self.kind.force_thresholds();
+    pub fn destruction_status(&self, thresholds: &ForceThresholds) -> DestructionStatus {
+        let (damaged_at, destroyed_at) = thresholds.get(self.kind);
         if self.peak_force >= destroyed_at || self.displacement() > SWEPT_THRESHOLD * 3.0 {
             DestructionStatus::Destroyed
         } else if self.peak_force >= damaged_at || self.displacement() > SWEPT_THRESHOLD {
@@ -191,7 +223,7 @@ impl DebrisState {
     /// The color to actually render this object as — `color` tinted toward
     /// char/soot as it takes damage, so destruction is visible in the scene
     /// itself and not just the settings-panel table.
-    pub fn display_color(&self) -> [f32; 3] {
+    pub fn display_color(&self, thresholds: &ForceThresholds) -> [f32; 3] {
         const DAMAGED_TINT: [f32; 3] = [0.12, 0.08, 0.06];
         const DESTROYED_TINT: [f32; 3] = [0.05, 0.04, 0.04];
         let mix = |a: [f32; 3], b: [f32; 3], t: f32| {
@@ -201,7 +233,7 @@ impl DebrisState {
                 a[2] + (b[2] - a[2]) * t,
             ]
         };
-        match self.destruction_status() {
+        match self.destruction_status(thresholds) {
             DestructionStatus::Intact => self.color,
             DestructionStatus::Damaged => mix(self.color, DAMAGED_TINT, 0.5),
             DestructionStatus::Destroyed => mix(self.color, DESTROYED_TINT, 0.85),

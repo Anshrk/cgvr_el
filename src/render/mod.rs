@@ -70,8 +70,13 @@ impl Renderer {
         self.background.rebuild_barricades(device, barricades);
     }
 
-    pub fn update_debris(&mut self, queue: &wgpu::Queue, debris: &[crate::sim::debris::DebrisState]) {
-        self.background.update_debris(queue, debris);
+    pub fn update_debris(
+        &mut self,
+        queue: &wgpu::Queue,
+        debris: &[crate::sim::debris::DebrisState],
+        thresholds: &crate::sim::debris::ForceThresholds,
+    ) {
+        self.background.update_debris(queue, debris, thresholds);
     }
 
     pub fn toggle_vorticity_heatmap(&mut self) {

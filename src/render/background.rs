@@ -283,10 +283,15 @@ impl BackgroundPipeline {
 
     /// Re-writes the (fixed-capacity) debris vertex buffer in place. Called
     /// every frame since debris moves continuously, unlike barricades.
-    pub fn update_debris(&mut self, queue: &wgpu::Queue, debris: &[DebrisState]) {
+    pub fn update_debris(
+        &mut self,
+        queue: &wgpu::Queue,
+        debris: &[DebrisState],
+        thresholds: &crate::sim::debris::ForceThresholds,
+    ) {
         let mut vertices = Vec::with_capacity(debris.len() * DEBRIS_VERTS_PER_OBJECT);
         for d in debris {
-            vertices.extend(box_quads(d.gpu.center, d.gpu.half_extents, d.display_color()));
+            vertices.extend(box_quads(d.gpu.center, d.gpu.half_extents, d.display_color(thresholds)));
         }
         self.debris_vertex_count = vertices.len() as u32;
         if !vertices.is_empty() {
