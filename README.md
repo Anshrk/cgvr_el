@@ -43,10 +43,22 @@ scope — lives in this repo's development history / project plan and is summari
 
 **Validated so far:** the SPH solver is physically stable (dam-break column collapses, hits the
 floor, splashes, settles — no NaN/blowup over 60+ seconds of simulated time), and the grid-based
-neighbor search (M2) produces matching physics to the naive baseline (M1) while being
-measurably faster — benchmarked at **~1.5× at 19k particles, ~10.5× at 53k particles** (GPU-synced
-timing; see `src/app.rs` for the measurement methodology). Press **G** at runtime to toggle
-between the two neighbor-search strategies and see this difference live.
+neighbor search (M2) produces matching physics to the naive baseline (M1) while being measurably
+faster. Press **G** at runtime to toggle between the two neighbor-search strategies and see this
+difference live, or press **B** to run a repeatable benchmark sweep (`run_benchmark` in
+`src/app.rs`: a few particle-count presets, both strategies where naive is still practical,
+GPU-synced timing via a blocking `device.poll`) that writes `benchmark_results.csv` — useful
+directly for the PAGP report's performance-comparison section. A sample sweep on the development
+machine (Apple M2):
+
+| Particles | Grid | Naive | Speedup |
+|---|---|---|---|
+| 7,488 | 26.4 ms/step | 39.1 ms/step | ~1.5× |
+| 19,404 | 35.0 ms/step | 234.6 ms/step | ~6.7× |
+| 45,240 | 46.6 ms/step | *(skipped — impractically slow)* | — |
+
+Naive is skipped at the largest preset since it scales as O(n²) and would take far too long per
+frame to be worth waiting on; grid's near-flat scaling across this range is the whole point of M2.
 
 The solver advances multiple fixed-`dt` substeps per rendered frame (adjustable at runtime with
 `+`/`-`) so simulated time keeps pace with wall-clock time at a small, numerically stable
@@ -98,6 +110,7 @@ cargo run --release
 | `U` | Toggle the settings panel |
 | `V` | Toggle the vorticity heatmap overlay (SSFR view only — press `F` first) |
 | `D` | Toggle dynamic CFL timestep vs. fixed dt — watch `dt` in the log shrink during a fast splash |
+| `B` | Run a benchmark sweep (naive vs. grid across a few particle counts), writes `benchmark_results.csv` |
 
 Movable debris (M7) spawns pre-placed in the dam-break's path as a small "urban flood" scene —
 trees and crates scattered where the collapsing column will reach them, and a row of houses

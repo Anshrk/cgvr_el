@@ -274,6 +274,9 @@ impl ApplicationHandler for App {
                             scene.selected_debris_kind = crate::sim::debris::DebrisKind::House;
                             eprintln!("[cgvr] middle-click now places: House");
                         }
+                        if s.as_str().eq_ignore_ascii_case("b") {
+                            run_benchmark(scene);
+                        }
                     }
                 }
             }
@@ -337,6 +340,85 @@ fn place_debris_at_cursor(scene: &mut Scene) {
     let center = [hit.x, floor_y + half_y, hit.z];
     scene.sph.place_debris(&scene.gpu.queue, center, kind);
     eprintln!("[cgvr] {:?} placed at ({:.2}, {:.2}, {:.2})", kind, center[0], center[1], center[2]);
+}
+
+/// Spacing presets swept by the `B` benchmark (smaller spacing = more
+/// particles). Chosen to span roughly the same particle-count range as the
+/// README's original one-off naive-vs-grid measurement (~19k-~53k), plus a
+/// smaller baseline, without going so large that the naive O(n^2) pass
+/// hangs for an impractically long time.
+const BENCHMARK_SPACINGS: &[f32] = &[0.16, 0.12, 0.09];
+const BENCHMARK_WARMUP_FRAMES: u32 = 5;
+const BENCHMARK_TIMED_FRAMES: u32 = 60;
+
+/// Runs each spacing preset through a fixed number of `SphSim::step` calls,
+/// honestly timed with a blocking `device.poll(wait_indefinitely())` after
+/// every submit (same technique used for the README's original one-off
+/// naive-vs-grid measurement, never shipped in the per-frame path since it's
+/// a real GPU/CPU sync point) — both neighbor-search strategies at the
+/// smaller presets, grid-only at the largest (naive would take far too long
+/// per frame there to be worth waiting on). Writes one row per
+/// (spacing, strategy) to `benchmark_results.csv` in the working directory.
+/// Uses fully separate `SphSim` instances — doesn't touch `scene.sph` or the
+/// live view at all, so the running demo is unaffected once this returns.
+fn run_benchmark(scene: &mut Scene) {
+    eprintln!("[cgvr] benchmark: starting ({} presets)...", BENCHMARK_SPACINGS.len());
+    let device = &scene.gpu.device;
+    let queue = &scene.gpu.queue;
+    let base_config = scene.ui_config;
+
+    let mut rows: Vec<(f32, u32, &'static str, f32)> = Vec::new();
+
+    for (i, &spacing) in BENCHMARK_SPACINGS.iter().enumerate() {
+        let config = DamBreakConfig { spacing, ..base_config };
+        // Skip the naive pass at the largest preset — this project's own
+        // earlier measurement already showed naive running ~10x slower
+        // than grid in this particle-count range, and it only gets worse.
+        let strategies: &[bool] = if i == BENCHMARK_SPACINGS.len() - 1 { &[true] } else { &[true, false] };
+
+        for &use_grid in strategies {
+            let mut sph = SphSim::new(device, config);
+            if !use_grid {
+                sph.toggle_neighbor_search();
+            }
+            let particle_count = sph.particle_count();
+            let strategy_label = if use_grid { "grid" } else { "naive" };
+
+            for _ in 0..BENCHMARK_WARMUP_FRAMES {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                sph.step(queue, &mut encoder);
+                queue.submit(Some(encoder.finish()));
+                device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll failed");
+            }
+
+            let start = Instant::now();
+            for _ in 0..BENCHMARK_TIMED_FRAMES {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                sph.step(queue, &mut encoder);
+                queue.submit(Some(encoder.finish()));
+                device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll failed");
+            }
+            let avg_ms = start.elapsed().as_secs_f32() * 1000.0 / BENCHMARK_TIMED_FRAMES as f32;
+
+            eprintln!(
+                "[cgvr] benchmark: {particle_count} particles, {strategy_label}: {avg_ms:.3} ms/step (~{:.0} FPS)",
+                1000.0 / avg_ms.max(0.001)
+            );
+            rows.push((spacing, particle_count, strategy_label, avg_ms));
+        }
+    }
+
+    let mut csv = String::from("spacing,particle_count,strategy,avg_step_ms,avg_fps\n");
+    for (spacing, particle_count, strategy, avg_ms) in &rows {
+        csv.push_str(&format!(
+            "{spacing},{particle_count},{strategy},{avg_ms:.4},{:.2}\n",
+            1000.0 / avg_ms.max(0.001)
+        ));
+    }
+    match std::fs::write("benchmark_results.csv", &csv) {
+        Ok(()) => eprintln!("[cgvr] benchmark: wrote benchmark_results.csv"),
+        Err(e) => eprintln!("[cgvr] benchmark: failed to write benchmark_results.csv: {e}"),
+    }
 }
 
 /// Draws the settings panel: live profiling readouts, the keybind
@@ -522,6 +604,7 @@ fn draw_settings_panel(
                                 ("F", "Toggle render view (SSFR/debug)"),
                                 ("V", "Toggle vorticity heatmap"),
                                 ("D", "Toggle adaptive CFL timestep"),
+                                ("B", "Run benchmark sweep (writes benchmark_results.csv)"),
                                 ("R", "Reset simulation"),
                                 ("P", "Pause/resume"),
                                 ("C", "Reset camera"),
