@@ -2,6 +2,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::CameraUniform;
 use crate::sim::barricade::Barricade;
+use crate::sim::debris::{DebrisState, MAX_DEBRIS};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -97,6 +98,8 @@ fn box_quads(center: [f32; 3], half: [f32; 3], color: [f32; 3]) -> Vec<Backgroun
 }
 
 const BARRICADE_COLOR: [f32; 3] = [0.75, 0.35, 0.2];
+const DEBRIS_COLOR: [f32; 3] = [0.55, 0.45, 0.3];
+const DEBRIS_VERTS_PER_OBJECT: usize = 36;
 
 pub struct BackgroundPipeline {
     pipeline: wgpu::RenderPipeline,
@@ -106,6 +109,11 @@ pub struct BackgroundPipeline {
     vertex_count: u32,
     barricade_vertex_buffer: Option<wgpu::Buffer>,
     barricade_vertex_count: u32,
+    // Debris moves every frame (unlike barricades, which only change on
+    // placement), so this is a fixed-capacity buffer re-written in place via
+    // `queue.write_buffer` each frame instead of reallocated.
+    debris_vertex_buffer: wgpu::Buffer,
+    debris_vertex_count: u32,
 }
 
 impl BackgroundPipeline {
@@ -230,6 +238,14 @@ impl BackgroundPipeline {
             }],
         });
 
+        let debris_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("debris-vertices"),
+            size: (MAX_DEBRIS * DEBRIS_VERTS_PER_OBJECT * std::mem::size_of::<BackgroundVertex>())
+                as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline,
             camera_buffer,
@@ -238,6 +254,8 @@ impl BackgroundPipeline {
             vertex_count,
             barricade_vertex_buffer: None,
             barricade_vertex_count: 0,
+            debris_vertex_buffer,
+            debris_vertex_count: 0,
         }
     }
 
@@ -264,6 +282,19 @@ impl BackgroundPipeline {
         };
     }
 
+    /// Re-writes the (fixed-capacity) debris vertex buffer in place. Called
+    /// every frame since debris moves continuously, unlike barricades.
+    pub fn update_debris(&mut self, queue: &wgpu::Queue, debris: &[DebrisState]) {
+        let mut vertices = Vec::with_capacity(debris.len() * DEBRIS_VERTS_PER_OBJECT);
+        for d in debris {
+            vertices.extend(box_quads(d.gpu.center, d.gpu.half_extents, DEBRIS_COLOR));
+        }
+        self.debris_vertex_count = vertices.len() as u32;
+        if !vertices.is_empty() {
+            queue.write_buffer(&self.debris_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        }
+    }
+
     pub fn draw<'pass>(&'pass self, render_pass: &mut wgpu::RenderPass<'pass>) {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
@@ -273,6 +304,11 @@ impl BackgroundPipeline {
         if let Some(buf) = &self.barricade_vertex_buffer {
             render_pass.set_vertex_buffer(0, buf.slice(..));
             render_pass.draw(0..self.barricade_vertex_count, 0..1);
+        }
+
+        if self.debris_vertex_count > 0 {
+            render_pass.set_vertex_buffer(0, self.debris_vertex_buffer.slice(..));
+            render_pass.draw(0..self.debris_vertex_count, 0..1);
         }
     }
 }

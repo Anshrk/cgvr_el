@@ -1,4 +1,5 @@
 pub mod barricade;
+pub mod debris;
 pub mod grid;
 pub mod params;
 pub mod particle;
@@ -6,6 +7,7 @@ pub mod particle;
 use wgpu::util::DeviceExt;
 
 use barricade::{Barricade, BarricadeListParams, MAX_BARRICADES};
+use debris::{DebrisListParams, DebrisState, MAX_DEBRIS};
 use grid::{bitonic_stage_pairs, BitonicParams, GridInfo, GridParams};
 use params::SimParams;
 use particle::{init_dam_break, DamBreakConfig, Particle};
@@ -95,6 +97,13 @@ pub struct SphSim {
     barricade_buffer: wgpu::Buffer,
     barricade_count_buffer: wgpu::Buffer,
 
+    // --- movable debris (two-way fluid coupling) ---
+    debris: Vec<DebrisState>,
+    debris_buffer: wgpu::Buffer,
+    debris_count_buffer: wgpu::Buffer,
+    debris_force_accum_buffer: wgpu::Buffer,
+    debris_force_staging_buffer: wgpu::Buffer,
+
     // --- M1: naive O(n^2) neighbor search ---
     density_pipeline: wgpu::ComputePipeline,
     integrate_pipeline: wgpu::ComputePipeline,
@@ -174,6 +183,45 @@ impl SphSim {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // ==================== movable debris (two-way fluid coupling) ====================
+        // Pre-placed for now (fixed scripted spawn layout); kept modular enough
+        // (same buffer/upload shape as barricades) to extend to user placement
+        // later without restructuring.
+        let debris: Vec<DebrisState> = debris::spawn_layout(params.domain_min, params.domain_max);
+        let debris_buffer = {
+            // Fixed-capacity buffer (MAX_DEBRIS slots), initialized from
+            // however many were actually spawned; the shader only reads the
+            // first `debris_list.count` of them.
+            let mut gpu_debris: Vec<debris::Debris> = debris.iter().map(|d| d.gpu).collect();
+            gpu_debris.resize(MAX_DEBRIS, bytemuck::Zeroable::zeroed());
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("debris"),
+                contents: bytemuck::cast_slice(&gpu_debris),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            })
+        };
+        let debris_count_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("debris-count"),
+            contents: bytemuck::bytes_of(&DebrisListParams { count: debris.len() as u32, _pad: [0; 3] }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        // Fixed-point i32 per (debris, axis) — atomicAdd target in the integrate
+        // shaders. Cleared to zero every frame before the substep loop, read
+        // back (via the staging buffer below) after it, in the same encoder.
+        let debris_force_accum_size = (MAX_DEBRIS * 3 * std::mem::size_of::<i32>()) as wgpu::BufferAddress;
+        let debris_force_accum_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("debris-force-accum"),
+            size: debris_force_accum_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let debris_force_staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("debris-force-staging"),
+            size: debris_force_accum_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // ==================== M1: naive O(n^2) ====================
         let density_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("density_pressure"),
@@ -200,6 +248,9 @@ impl SphSim {
                 storage_entry(2, false),
                 uniform_entry(3),
                 storage_entry(4, true),
+                uniform_entry(5),
+                storage_entry(6, true),
+                storage_entry(7, false), // debris_force_accum: atomicAdd target, needs read_write
             ],
         });
 
@@ -257,6 +308,9 @@ impl SphSim {
                 wgpu::BindGroupEntry { binding: 2, resource: buffer_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: barricade_count_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: barricade_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: debris_count_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: debris_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: debris_force_accum_buffer.as_entire_binding() },
             ],
         });
         let integrate_bind_group_b_to_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -268,6 +322,9 @@ impl SphSim {
                 wgpu::BindGroupEntry { binding: 2, resource: buffer_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: barricade_count_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: barricade_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: debris_count_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: debris_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: debris_force_accum_buffer.as_entire_binding() },
             ],
         });
 
@@ -531,6 +588,12 @@ impl SphSim {
             barricade_buffer,
             barricade_count_buffer,
 
+            debris,
+            debris_buffer,
+            debris_count_buffer,
+            debris_force_accum_buffer,
+            debris_force_staging_buffer,
+
             density_pipeline,
             integrate_pipeline,
             density_bind_group_a: density_bind_group_a.clone(),
@@ -580,9 +643,14 @@ impl SphSim {
         &self.barricades
     }
 
+    pub fn debris(&self) -> &[DebrisState] {
+        &self.debris
+    }
+
     /// Resets the simulation to its initial dam-break state (same particle
-    /// count/layout, since spacing/domain don't change at runtime) and
-    /// clears all placed barricades. Triggered by the `R` key.
+    /// count/layout, since spacing/domain don't change at runtime), clears
+    /// all placed barricades, and respawns debris at their scripted layout.
+    /// Triggered by the `R` key.
     pub fn reset(&mut self, queue: &wgpu::Queue) {
         let mut params = SimParams::new_dam_break(0, self.dam_config.spacing);
         let particles = init_dam_break(&mut params, &self.dam_config);
@@ -597,6 +665,23 @@ impl SphSim {
             &self.barricade_count_buffer,
             0,
             bytemuck::bytes_of(&BarricadeListParams { count: 0, _pad: [0; 3] }),
+        );
+
+        self.debris = debris::spawn_layout(self.params.domain_min, self.params.domain_max);
+        self.upload_debris(queue);
+    }
+
+    /// Re-uploads the full debris array + count (same shape as barricades'
+    /// upload). Fixed-capacity buffer, so unused trailing slots are padded
+    /// with zeroed entries the shader never reads (bounded by `debris_list.count`).
+    fn upload_debris(&self, queue: &wgpu::Queue) {
+        let mut gpu_debris: Vec<debris::Debris> = self.debris.iter().map(|d| d.gpu).collect();
+        gpu_debris.resize(MAX_DEBRIS, bytemuck::Zeroable::zeroed());
+        queue.write_buffer(&self.debris_buffer, 0, bytemuck::cast_slice(&gpu_debris));
+        queue.write_buffer(
+            &self.debris_count_buffer,
+            0,
+            bytemuck::bytes_of(&DebrisListParams { count: self.debris.len() as u32, _pad: [0; 3] }),
         );
     }
 
@@ -639,11 +724,104 @@ impl SphSim {
 
     /// Advances the sim by `SUBSTEPS_PER_FRAME` fixed-`dt` substeps so simulated
     /// time keeps pace with wall-clock time at a stable small dt.
+    ///
+    /// Also clears the debris force accumulator before the substep loop and
+    /// copies it to a staging buffer after, in this same encoder — the
+    /// accumulated impulse covers the *whole* frame's simulated time
+    /// (`substeps_per_frame * dt`), not one substep (see
+    /// `update_debris_from_gpu`, called by the caller once this encoder has
+    /// been submitted and the GPU work has completed).
     pub fn step(&mut self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&self.params));
+
+        let accum_size = (MAX_DEBRIS * 3 * std::mem::size_of::<i32>()) as wgpu::BufferAddress;
+        queue.write_buffer(&self.debris_force_accum_buffer, 0, &vec![0u8; accum_size as usize]);
+
         for _ in 0..self.substeps_per_frame {
             self.substep(encoder);
         }
+
+        encoder.copy_buffer_to_buffer(
+            &self.debris_force_accum_buffer,
+            0,
+            &self.debris_force_staging_buffer,
+            0,
+            accum_size,
+        );
+    }
+
+    /// Reads back this frame's accumulated fluid→debris impulse (tiny
+    /// buffer — a few dozen bytes, not the ~900KB particle array — so a
+    /// blocking poll here is a per-frame GPU/CPU sync point, but a cheap
+    /// one; see the project plan for the non-blocking upgrade path if this
+    /// ever measurably hitches), integrates each debris object with
+    /// semi-implicit Euler over this frame's simulated time, and re-uploads
+    /// the updated debris array. Call once per frame, after submitting the
+    /// encoder `step` wrote into.
+    pub fn update_debris_from_gpu(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.debris.is_empty() {
+            return;
+        }
+
+        let slice = self.debris_force_staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
+        rx.recv()
+            .expect("map_async callback never fired")
+            .expect("failed to map debris force staging buffer");
+
+        let dt_total = self.substeps_per_frame as f32 * self.params.dt;
+        let gravity = [0.0_f32, self.params.gravity_y, 0.0_f32];
+        let floor_y = self.params.domain_min[1];
+
+        {
+            let data = slice.get_mapped_range().expect("buffer not mapped");
+            let accum: &[i32] = bytemuck::cast_slice(&data);
+
+            for (i, d) in self.debris.iter_mut().enumerate() {
+                let impulse = [
+                    accum[i * 3] as f32 / debris::FORCE_FIXED_POINT_SCALE,
+                    accum[i * 3 + 1] as f32 / debris::FORCE_FIXED_POINT_SCALE,
+                    accum[i * 3 + 2] as f32 / debris::FORCE_FIXED_POINT_SCALE,
+                ];
+                let mass = d.gpu.mass;
+                for axis in 0..3 {
+                    d.gpu.velocity[axis] += impulse[axis] / mass + gravity[axis] * dt_total;
+                }
+
+                for axis in 0..3 {
+                    d.gpu.center[axis] += d.gpu.velocity[axis] * dt_total;
+                }
+
+                // Floor/wall clamp, mirroring the particle domain-wall
+                // collision but simpler (no SPH forces involved here).
+                let half = d.gpu.half_extents;
+                let damping = 0.4;
+                if d.gpu.center[1] - half[1] < floor_y {
+                    d.gpu.center[1] = floor_y + half[1];
+                    d.gpu.velocity[1] = -d.gpu.velocity[1] * damping;
+                }
+                for axis in [0usize, 2usize] {
+                    let min = self.params.domain_min[axis] + half[axis];
+                    let max = self.params.domain_max[axis] - half[axis];
+                    if d.gpu.center[axis] < min {
+                        d.gpu.center[axis] = min;
+                        d.gpu.velocity[axis] = -d.gpu.velocity[axis] * damping;
+                    } else if d.gpu.center[axis] > max {
+                        d.gpu.center[axis] = max;
+                        d.gpu.velocity[axis] = -d.gpu.velocity[axis] * damping;
+                    }
+                }
+            }
+        }
+        self.debris_force_staging_buffer.unmap();
+
+        self.upload_debris(queue);
     }
 
     pub fn substeps_per_frame(&self) -> u32 {

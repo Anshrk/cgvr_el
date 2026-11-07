@@ -33,6 +33,13 @@ struct Scene {
     egui_state: EguiState,
     ui_config: DamBreakConfig,
     show_settings: bool,
+    /// The settings panel's on-screen rect (logical points, previous frame)
+    /// — used to gate camera input ourselves instead of trusting egui's
+    /// `consumed` flag, which is unreliable here: `egui::Context::
+    /// is_pointer_over_egui` falls back to `true` *everywhere* whenever
+    /// there's no central panel / root-level UI (we only use a floating
+    /// `egui::Window`), which is exactly our case.
+    settings_panel_rect: Option<egui::Rect>,
 }
 
 #[derive(Default)]
@@ -93,6 +100,7 @@ impl ApplicationHandler for App {
             egui_state,
             ui_config,
             show_settings: true,
+            settings_panel_rect: None,
         });
     }
 
@@ -106,7 +114,19 @@ impl ApplicationHandler for App {
             return;
         };
 
-        let egui_consumed = scene.egui_state.handle_event(window, &event);
+        // NOT using the `consumed` flag from this: egui's `is_pointer_over_egui`
+        // falls back to `true` *everywhere on screen* whenever there's no
+        // central panel / root-level UI content (we only use a floating
+        // `egui::Window`), which is exactly our case — so it's unusable for
+        // gating camera input here. Still feed events through so widgets
+        // (sliders, buttons) work; just don't trust the returned bool.
+        let _ = scene.egui_state.handle_event(window, &event);
+        let over_panel = |scene: &Scene, pos: (f64, f64)| -> bool {
+            scene.settings_panel_rect.is_some_and(|rect| {
+                let scale = window.scale_factor() as f32;
+                rect.contains(egui::pos2(pos.0 as f32 / scale, pos.1 as f32 / scale))
+            })
+        };
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -120,7 +140,7 @@ impl ApplicationHandler for App {
                 state,
                 button: MouseButton::Left,
                 ..
-            } if !egui_consumed => {
+            } if !over_panel(scene, scene.cursor_pos) => {
                 scene.dragging = state == ElementState::Pressed;
                 if !scene.dragging {
                     scene.last_cursor = None;
@@ -130,15 +150,15 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } if !egui_consumed => {
+            } if !over_panel(scene, scene.cursor_pos) => {
                 place_barricade_at_cursor(scene);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // Always track the cursor position (needed for barricade
-                // placement), but only drive camera orbit when egui isn't
-                // using the drag (e.g. dragging a slider).
+                // placement), but only drive camera orbit when the cursor
+                // isn't over the settings panel.
                 scene.cursor_pos = (position.x, position.y);
-                if scene.dragging && !egui_consumed {
+                if scene.dragging && !over_panel(scene, scene.cursor_pos) {
                     if let Some((lx, ly)) = scene.last_cursor {
                         let dx = (position.x - lx) as f32;
                         let dy = (position.y - ly) as f32;
@@ -147,7 +167,7 @@ impl ApplicationHandler for App {
                 }
                 scene.last_cursor = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } if !egui_consumed => {
+            WindowEvent::MouseWheel { delta, .. } if !over_panel(scene, scene.cursor_pos) => {
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(pos) => (pos.y / 40.0) as f32,
@@ -273,9 +293,24 @@ fn draw_settings_panel(
     let paused = scene.paused;
     let stats = scene.last_stats;
 
+    let debris_total = scene.sph.debris().len();
+    let swept_count = scene
+        .sph
+        .debris()
+        .iter()
+        .filter(|d| d.displacement() > crate::sim::debris::SWEPT_THRESHOLD)
+        .count();
+    let max_displacement = scene
+        .sph
+        .debris()
+        .iter()
+        .map(|d| d.displacement())
+        .fold(0.0_f32, f32::max);
+
     let gpu = &scene.gpu;
     let ui_config = &mut scene.ui_config;
     let mut rebuild = false;
+    let mut panel_rect = None;
 
     scene.egui_state.render(
         &gpu.device,
@@ -286,69 +321,86 @@ fn draw_settings_panel(
         gpu.config.width,
         gpu.config.height,
         |ctx| {
-            egui::Window::new("CGVR Settings (U to hide)").show(ctx, |ui| {
-                ui.heading("Status");
-                ui.label(format!("FPS: {fps:.0} ({frame_ms:.2} ms/frame)"));
-                ui.label(format!("Particles: {particle_count}"));
-                ui.label(format!("Barricades: {barricade_count} / 8"));
-                ui.label(format!(
-                    "Neighbor search: {}",
-                    if using_grid { "grid (M2)" } else { "naive O(n^2) (M1)" }
-                ));
-                ui.label(format!(
-                    "Render view: {}",
-                    if ssfr_enabled { "SSFR (M3)" } else { "point-sprite debug (M1)" }
-                ));
-                ui.label(format!("Vorticity heatmap: {}", if vorticity_on { "on" } else { "off" }));
-                ui.label(format!(
-                    "Timestep: {dt:.5} ({})",
-                    if adaptive_dt { "adaptive CFL" } else { "fixed" }
-                ));
-                ui.label(format!("Time scale: {substeps} substeps/frame"));
-                ui.label(format!("State: {}", if paused { "paused" } else { "running" }));
-                ui.label(format!(
-                    "Last reading: y=[{:.2},{:.2}] max_speed={:.2} max_density={:.1} nan={}",
-                    stats.min_y, stats.max_y, stats.max_speed, stats.max_density, stats.nan_count
-                ));
+            let window_response = egui::Window::new("CGVR Settings (U to hide)")
+                .anchor(egui::Align2::LEFT_TOP, [8.0, 8.0])
+                .default_width(260.0)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.set_max_width(260.0);
 
-                ui.separator();
-                ui.heading("Dam-break config");
-                ui.add(egui::Slider::new(&mut ui_config.spacing, 0.06..=0.25).text("particle spacing"));
-                ui.add(egui::Slider::new(&mut ui_config.width_frac, 0.1..=0.6).text("dam width fraction"));
-                ui.add(egui::Slider::new(&mut ui_config.height_frac, 0.1..=0.9).text("dam height fraction"));
-                ui.label("(smaller spacing = more, denser particles — rebuild to apply)");
-                if ui.button("Rebuild simulation").clicked() {
-                    rebuild = true;
-                }
+                    egui::CollapsingHeader::new("Status").default_open(true).show(ui, |ui| {
+                        ui.label(format!("FPS: {fps:.0} ({frame_ms:.2} ms/frame)"));
+                        ui.label(format!("Particles: {particle_count}"));
+                        ui.label(format!("Barricades: {barricade_count} / 8"));
+                        ui.label(format!(
+                            "Neighbor search: {}",
+                            if using_grid { "grid (M2)" } else { "naive O(n^2) (M1)" }
+                        ));
+                        ui.label(format!(
+                            "Render view: {}",
+                            if ssfr_enabled { "SSFR (M3)" } else { "point-sprite debug (M1)" }
+                        ));
+                        ui.label(format!("Vorticity heatmap: {}", if vorticity_on { "on" } else { "off" }));
+                        ui.label(format!(
+                            "Timestep: {dt:.5} ({})",
+                            if adaptive_dt { "adaptive CFL" } else { "fixed" }
+                        ));
+                        ui.label(format!("Time scale: {substeps} substeps/frame"));
+                        ui.label(format!("State: {}", if paused { "paused" } else { "running" }));
+                        ui.label(format!(
+                            "Last reading: y=[{:.2},{:.2}] max_speed={:.2} max_density={:.1} nan={}",
+                            stats.min_y, stats.max_y, stats.max_speed, stats.max_density, stats.nan_count
+                        ));
+                    });
 
-                ui.separator();
-                ui.heading("Keybinds");
-                egui::Grid::new("keybind-grid").striped(true).show(ui, |ui| {
-                    let rows: &[(&str, &str)] = &[
-                        ("Left-drag", "Orbit camera"),
-                        ("Scroll", "Zoom"),
-                        ("Right-click", "Place barricade"),
-                        ("G", "Toggle neighbor search (grid/naive)"),
-                        ("F", "Toggle render view (SSFR/debug)"),
-                        ("V", "Toggle vorticity heatmap"),
-                        ("D", "Toggle adaptive CFL timestep"),
-                        ("R", "Reset simulation"),
-                        ("P", "Pause/resume"),
-                        ("C", "Reset camera"),
-                        ("+ / -", "Speed up / slow down time scale"),
-                        ("U", "Toggle this panel"),
-                        ("Q", "Quit"),
-                    ];
-                    for (key, action) in rows {
-                        ui.label(*key);
-                        ui.label(*action);
-                        ui.end_row();
-                    }
+                    egui::CollapsingHeader::new("Flood Impact").default_open(true).show(ui, |ui| {
+                        ui.label(format!("Debris swept away: {swept_count} / {debris_total}"));
+                        ui.label(format!("Max displacement: {max_displacement:.2} m"));
+                    });
+
+                    egui::CollapsingHeader::new("Dam-break config").default_open(true).show(ui, |ui| {
+                        ui.add(egui::Slider::new(&mut ui_config.spacing, 0.06..=0.25).text("particle spacing"));
+                        ui.add(egui::Slider::new(&mut ui_config.width_frac, 0.1..=0.6).text("dam width fraction"));
+                        ui.add(egui::Slider::new(&mut ui_config.height_frac, 0.1..=0.9).text("dam height fraction"));
+                        ui.label("(smaller spacing = more particles — rebuild to apply)");
+                        if ui.button("Rebuild simulation").clicked() {
+                            rebuild = true;
+                        }
+                    });
+
+                    egui::CollapsingHeader::new("Keybinds").default_open(false).show(ui, |ui| {
+                        egui::Grid::new("keybind-grid").striped(true).show(ui, |ui| {
+                            let rows: &[(&str, &str)] = &[
+                                ("Left-drag", "Orbit camera"),
+                                ("Scroll", "Zoom"),
+                                ("Right-click", "Place barricade"),
+                                ("G", "Toggle neighbor search (grid/naive)"),
+                                ("F", "Toggle render view (SSFR/debug)"),
+                                ("V", "Toggle vorticity heatmap"),
+                                ("D", "Toggle adaptive CFL timestep"),
+                                ("R", "Reset simulation"),
+                                ("P", "Pause/resume"),
+                                ("C", "Reset camera"),
+                                ("+ / -", "Speed up / slow down time scale"),
+                                ("U", "Toggle this panel"),
+                                ("Q", "Quit"),
+                            ];
+                            for (key, action) in rows {
+                                ui.label(*key);
+                                ui.label(*action);
+                                ui.end_row();
+                            }
+                        });
+                    });
                 });
-            });
+
+            if let Some(response) = window_response {
+                panel_rect = Some(response.response.rect);
+            }
         },
     );
 
+    scene.settings_panel_rect = panel_rect;
     rebuild
 }
 
@@ -390,11 +442,20 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
     let rebuild_requested = if scene.show_settings {
         Some(draw_settings_panel(scene, window, &color_view, &mut encoder))
     } else {
+        scene.settings_panel_rect = None;
         None
     };
 
     scene.gpu.queue.submit(Some(encoder.finish()));
     scene.gpu.queue.present(surface_texture);
+
+    // Gated on !paused, same as sph.step(): when paused, step() (and the
+    // accumulator clear inside it) never ran this frame, so reading it back
+    // here would just re-apply the same stale impulse repeatedly.
+    if !scene.paused {
+        scene.sph.update_debris_from_gpu(&scene.gpu.device, &scene.gpu.queue);
+    }
+    scene.renderer.update_debris(&scene.gpu.queue, scene.sph.debris());
 
     if rebuild_requested == Some(true) {
         scene.sph = SphSim::new(&scene.gpu.device, scene.ui_config);
@@ -431,5 +492,14 @@ fn step_and_render(scene: &mut Scene, window: &Window) {
             stats.nan_count,
         );
         scene.last_stats = stats;
+
+        let max_disp = scene.sph.debris().iter().map(|d| d.displacement()).fold(0.0_f32, f32::max);
+        let positions: Vec<String> = scene
+            .sph
+            .debris()
+            .iter()
+            .map(|d| format!("({:.2},{:.2},{:.2})", d.gpu.center[0], d.gpu.center[1], d.gpu.center[2]))
+            .collect();
+        eprintln!("[cgvr] debris max_displacement={max_disp:.3} positions={positions:?}");
     }
 }

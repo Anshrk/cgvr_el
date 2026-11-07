@@ -47,11 +47,34 @@ struct BarricadeListParams {
     _pad2: u32,
 };
 
+// Movable debris (two-way fluid coupling) — see forces_integrate.wgsl's
+// apply_debris_collisions for the full rationale; identical physics here,
+// just walked once per particle regardless of neighbor-search strategy.
+struct Debris {
+    center: vec3<f32>,
+    half_extents: vec3<f32>,
+    velocity: vec3<f32>,
+    mass: f32,
+};
+
+struct DebrisListParams {
+    count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
 @group(0) @binding(0) var<uniform> params: SimParams;
 @group(0) @binding(1) var<storage, read> particles_src: array<Particle>;
 @group(0) @binding(2) var<storage, read_write> particles_dst: array<Particle>;
 @group(0) @binding(3) var<uniform> barricade_list: BarricadeListParams;
 @group(0) @binding(4) var<storage, read> barricades: array<Barricade>;
+@group(0) @binding(5) var<uniform> debris_list: DebrisListParams;
+@group(0) @binding(6) var<storage, read> debris: array<Debris>;
+@group(0) @binding(7) var<storage, read_write> debris_force_accum: array<atomic<i32>>;
+
+const FORCE_FIXED_POINT_SCALE: f32 = 1000.0;
+
 @group(1) @binding(0) var<uniform> grid: GridParams;
 @group(1) @binding(1) var<storage, read> particle_indices: array<u32>;
 @group(1) @binding(2) var<storage, read> cell_start: array<u32>;
@@ -110,6 +133,55 @@ fn apply_barricade_collisions(position_in: vec3<f32>, velocity_in: vec3<f32>) ->
                 position.z = bar.center.z + sign(local.z) * (bar.half_extents.z + margin);
                 velocity.z = -velocity.z * damping;
             }
+        }
+    }
+
+    return array<vec3<f32>, 2>(position, velocity);
+}
+
+// Movable debris collision + reaction-impulse accumulation — see
+// forces_integrate.wgsl's apply_debris_collisions for the full rationale.
+fn apply_debris_collisions(position_in: vec3<f32>, velocity_in: vec3<f32>) -> array<vec3<f32>, 2> {
+    var position = position_in;
+    var velocity = velocity_in;
+    let damping = 0.3;
+    let margin = 0.001;
+
+    for (var d: u32 = 0u; d < debris_list.count; d = d + 1u) {
+        let obj = debris[d];
+        let local = position - obj.center;
+        if (abs(local.x) < obj.half_extents.x && abs(local.y) < obj.half_extents.y && abs(local.z) < obj.half_extents.z) {
+            let pen_x = obj.half_extents.x - abs(local.x);
+            let pen_y = obj.half_extents.y - abs(local.y);
+            let pen_z = obj.half_extents.z - abs(local.z);
+
+            var axis: u32;
+            var old_v: f32;
+            var new_v: f32;
+
+            if (pen_x <= pen_y && pen_x <= pen_z) {
+                axis = 0u;
+                old_v = velocity.x;
+                position.x = obj.center.x + sign(local.x) * (obj.half_extents.x + margin);
+                velocity.x = -velocity.x * damping;
+                new_v = velocity.x;
+            } else if (pen_y <= pen_x && pen_y <= pen_z) {
+                axis = 1u;
+                old_v = velocity.y;
+                position.y = obj.center.y + sign(local.y) * (obj.half_extents.y + margin);
+                velocity.y = -velocity.y * damping;
+                new_v = velocity.y;
+            } else {
+                axis = 2u;
+                old_v = velocity.z;
+                position.z = obj.center.z + sign(local.z) * (obj.half_extents.z + margin);
+                velocity.z = -velocity.z * damping;
+                new_v = velocity.z;
+            }
+
+            let impulse_on_debris = -params.particle_mass * (new_v - old_v);
+            let fixed_point = i32(impulse_on_debris * FORCE_FIXED_POINT_SCALE);
+            atomicAdd(&debris_force_accum[d * 3u + axis], fixed_point);
         }
     }
 
@@ -227,6 +299,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let barricade_result = apply_barricade_collisions(position, velocity);
     position = barricade_result[0];
     velocity = barricade_result[1];
+
+    let debris_result = apply_debris_collisions(position, velocity);
+    position = debris_result[0];
+    velocity = debris_result[1];
 
     var out: Particle;
     out.position = position;

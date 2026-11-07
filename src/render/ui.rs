@@ -55,7 +55,7 @@ impl EguiState {
         let raw_input = self.winit_state.take_egui_input(window);
         self.ctx.begin_pass(raw_input);
         let ui_result = run_ui(&self.ctx);
-        let full_output = self.ctx.end_pass();
+        let mut full_output = self.ctx.end_pass();
         self.winit_state
             .handle_platform_output(window, full_output.platform_output.clone());
 
@@ -97,6 +97,9 @@ impl EguiState {
         for id in &full_output.textures_delta.free {
             self.renderer.free_texture(id);
         }
+        // TexturesDelta panics on drop if not explicitly cleared once handled
+        // (a safety net against forgetting to apply/free texture deltas).
+        full_output.textures_delta.clear();
 
         ui_result
     }

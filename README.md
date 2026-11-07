@@ -18,10 +18,12 @@ legitimately satisfying both course components:
 - **PAGP** → GPU compute shaders written in WGSL via [`wgpu`](https://wgpu.rs/), dispatched as
   genuinely parallel GPU kernels (the WGSL/wgpu analogue of CUDA kernels / HLSL compute shaders),
   running on Metal.
-- **CGVR** → real-time 3D rendering, with a screen-space fluid rendering pipeline (in progress —
-  see Status below). Stereoscopic/VR rendering is deprioritized to the end of the project (desktop
-  stereo simulation, not a real OpenXR headset integration — no headset is available) in favor of
-  spending the time on simulation and rendering quality, which is the more substantial deliverable.
+- **CGVR** → real-time 3D rendering: screen-space fluid rendering, a vorticity heatmap, an
+  interactive settings panel, and user-placed obstacles. Stereoscopic/VR rendering is explicitly
+  out of scope for this project (no headset available, and the simulation/rendering quality is the
+  more substantial deliverable) — the course's proposal only requires demonstrating CGVR and PAGP
+  *combined*, not a VR headset specifically, and the non-VR CGVR content here (real-time rendering,
+  interaction, visualization) already satisfies that.
 
 The full implementation plan — architecture, milestone sequence, and what's explicitly out of
 scope — lives in this repo's development history / project plan and is summarized below.
@@ -35,8 +37,9 @@ scope — lives in this repo's development history / project plan and is summari
 | M2 | GPU uniform spatial hash grid + bitonic sort neighbor search (replaces the O(n²) walk at scale) | ✅ Done |
 | M3 | Screen-space fluid rendering (depth splat → bilateral blur → reconstructed normals → shading) + background/ground plane | ✅ Done — confirmed looking better than the debug view |
 | M5 | Barricade placement (mouse-ray) + collision | ✅ Done |
-| M6 | Vorticity heatmap ✅, dynamic CFL timestep ✅ done; Fresnel/refraction, on-screen profiling still planned | 🚧 In progress |
-| M4 | Desktop stereo camera (VR-sim) | ⏳ Deprioritized to the end |
+| M6 | Vorticity heatmap ✅, dynamic CFL timestep ✅, on-screen settings/profiling panel ✅ done; Fresnel/refraction shading polish still planned | 🚧 In progress |
+| M7 | Movable debris: two-way fluid↔object coupling (GPU atomic force accumulation → CPU rigid-body integration), pre-placed "urban clutter" the flood visibly pushes/carries, flood-impact metric | ✅ Done — confirmed live: debris slides across the whole domain and gets lifted/tumbled as the flood passes |
+| ~~M4~~ | ~~Desktop stereo camera (VR-sim)~~ | ❌ Dropped — out of scope (see Context) |
 
 **Validated so far:** the SPH solver is physically stable (dam-break column collapses, hits the
 floor, splashes, settles — no NaN/blowup over 60+ seconds of simulated time), and the grid-based
@@ -45,9 +48,11 @@ measurably faster — benchmarked at **~1.5× at 19k particles, ~10.5× at 53k p
 timing; see `src/app.rs` for the measurement methodology). Press **G** at runtime to toggle
 between the two neighbor-search strategies and see this difference live.
 
-The solver advances 8 fixed-`dt` substeps per rendered frame (`SUBSTEPS_PER_FRAME` in
-`sim/mod.rs`) so simulated time keeps pace with wall-clock time at a small, numerically stable
-timestep, rather than crawling at `dt`-per-frame speed.
+The solver advances multiple fixed-`dt` substeps per rendered frame (adjustable at runtime with
+`+`/`-`) so simulated time keeps pace with wall-clock time at a small, numerically stable
+timestep, rather than crawling at `dt`-per-frame speed. It also includes a short-range cohesion
+force (surface-tension-like attraction between nearby particles) — without it, SPH water behaves
+like a spray of independent particles rather than sticking together into sheets/droplets.
 
 Rendering defaults to the M1 debug view (flat-shaded billboard spheres); press **F** to switch to
 the M3 screen-space fluid rendering pipeline (depth splat → bilateral blur → reconstructed normals
@@ -88,12 +93,37 @@ cargo run --release
 | `C` | Reset the camera to its default orbit view |
 | `+` / `-` | Speed up / slow down the simulation's time scale (substeps per rendered frame) |
 | `Q` | Quit |
+| `U` | Toggle the settings panel |
 | `V` | Toggle the vorticity heatmap overlay (SSFR view only — press `F` first) |
 | `D` | Toggle dynamic CFL timestep vs. fixed dt — watch `dt` in the log shrink during a fast splash |
+
+Movable debris (M7) spawn pre-placed in the dam-break's path (no keybind yet — see Project
+layout below for the planned extension to user placement). The flood visibly pushes them
+downstream via a real two-way fluid↔object coupling (not just one-way collision like
+barricades): the fluid's exact reaction impulse is accumulated per-object on the GPU
+(fixed-point atomics, since WGSL has no `atomic<f32>`), read back once per frame, and integrated
+into each object's own velocity/position on the CPU. The settings panel's **Flood Impact**
+section shows how many were swept away and the max displacement — a quantified version of the
+project's original "how does the flood affect its environment" framing. This per-frame readback
+is a real (measured) performance cost — expect noticeably lower FPS than without it; see
+`SphSim::update_debris_from_gpu` in `src/sim/mod.rs` for the non-blocking upgrade path if that
+becomes a problem.
 
 The app logs particle count, frame time, and basic physics sanity stats (min/max height, max
 speed, max density, NaN count) to stderr roughly once a second, plus densely for the first ~30
 frames at startup (useful for spotting instability early).
+
+### Settings panel
+
+An on-screen panel (toggle with `U`) mirrors all of the above as live readouts, lists every
+keybind, and exposes the dam-break scenario as editable sliders:
+
+- **Particle spacing** — smaller spacing means more, denser particles.
+- **Dam width / height fraction** — how much of the domain the initial water column fills.
+
+Click **Rebuild simulation** to apply changes — this reconstructs the whole GPU particle buffer
+set (particle count changes need fresh buffer sizes, not just a parameter tweak), clearing any
+placed barricades in the process.
 
 ## Project layout
 
@@ -104,6 +134,10 @@ src/
   gpu.rs           — wgpu instance/adapter/device/surface setup
   camera.rs        — orbit camera + billboard camera uniform
   sim/             — SPH solver: particle buffers, compute pipelines (naive + grid), dam-break init
+    barricade.rs   — user-placed static obstacles (one-way collision)
+    debris.rs      — movable debris (two-way fluid coupling); `place_barricade`'s shape is the
+                     template for later adding a user-placement path here, mirroring
+                     `place_barricade_at_cursor` in app.rs
   render/
     background.rs  — ground plane + boundary wall geometry (opaque pass)
     point_sprite.rs— M1 debug view: flat-shaded billboard spheres
